@@ -171,6 +171,54 @@ gcloud secrets add-iam-policy-binding "myapp_DATABASE_URL" \
   --project=central-project
 ```
 
+## MCP サーバー (Claude Code 連携)
+
+Claude Code から直接シークレットを操作できます。
+
+### インストール
+
+```bash
+cd gcloudSec
+npm install
+```
+
+### Claude Code に登録
+
+```bash
+claude mcp add gcloud-secrets node /root/gcloudSec/mcp-server.js
+```
+
+または `~/.claude/settings.json` に直接追加:
+
+```json
+{
+  "mcpServers": {
+    "gcloud-secrets": {
+      "command": "node",
+      "args": ["/root/gcloudSec/mcp-server.js"]
+    }
+  }
+}
+```
+
+### 利用可能なツール
+
+| ツール | 説明 |
+|--------|------|
+| `secrets_init` | 中央プロジェクトを設定 |
+| `secrets_list` | フォルダ/シークレット一覧 |
+| `secrets_pull` | シークレットを .env 形式で取得 |
+| `secrets_push` | .env 内容をアップロード |
+| `secrets_delete` | シークレット削除 |
+
+### 使用例
+
+Claude に以下のように依頼できます:
+
+- 「このプロジェクトの .env を Secret Manager にアップロードして」
+- 「my-project のシークレットを取得して」
+- 「Secret Manager のフォルダ一覧を見せて」
+
 ## ライセンス
 
 MIT

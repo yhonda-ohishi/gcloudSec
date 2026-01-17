@@ -1,0 +1,27 @@
+{
+  "name": "gcloud-secrets-mcp",
+  "version": "1.0.0",
+  "description": "GCP Secret Manager を GitHub clone 風に管理する MCP サーバー",
+  "type": "module",
+  "main": "mcp-server.js",
+  "bin": {
+    "gcloud-secrets-mcp": "./mcp-server.js"
+  },
+  "scripts": {
+    "start": "node mcp-server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yhonda-ohishi/gcloudSec.git"
+  },
+  "keywords": ["mcp", "gcp", "secret-manager", "env"],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/yhonda-ohishi/gcloudSec/issues"
+  },
+  "homepage": "https://github.com/yhonda-ohishi/gcloudSec#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2"
+  }
+}
