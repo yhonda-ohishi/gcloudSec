@@ -14,7 +14,12 @@
     "type": "git",
     "url": "git+https://github.com/yhonda-ohishi/gcloudSec.git"
   },
-  "keywords": ["mcp", "gcp", "secret-manager", "env"],
+  "keywords": [
+    "mcp",
+    "gcp",
+    "secret-manager",
+    "env"
+  ],
   "author": "",
   "license": "ISC",
   "bugs": {
@@ -22,6 +27,7 @@
   },
   "homepage": "https://github.com/yhonda-ohishi/gcloudSec#readme",
   "dependencies": {
+    "@google-cloud/secret-manager": "^6.1.1",
     "@modelcontextprotocol/sdk": "^1.25.2"
   }
 }
