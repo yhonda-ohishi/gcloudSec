@@ -6,10 +6,13 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { execSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
+import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { basename } from "path";
 import { homedir } from "os";
+
+// SDK クライアント初期化
+const client = new SecretManagerServiceClient();
 
 // 設定読み込み
 function getConfig() {
@@ -24,18 +27,6 @@ function getConfig() {
   return { centralProject: process.env.SECRETS_CENTRAL_PROJECT || "" };
 }
 
-// gcloud コマンド実行
-function runGcloud(args) {
-  try {
-    return execSync(`gcloud ${args}`, {
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024,
-    }).trim();
-  } catch (error) {
-    throw new Error(error.stderr || error.message);
-  }
-}
-
 // シークレット名生成
 function makeSecretName(folder, key) {
   return `${folder}_${key}`;
@@ -45,6 +36,11 @@ function makeSecretName(folder, key) {
 function getKeyFromSecret(secretName) {
   const parts = secretName.split("_");
   return parts.slice(1).join("_");
+}
+
+// シークレット名からフォルダを抽出
+function getFolderFromSecret(secretName) {
+  return secretName.split("_")[0];
 }
 
 const server = new Server(
@@ -72,8 +68,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             folder: {
               type: "string",
-              description:
-                "フォルダ名（省略時はフォルダ一覧を表示）",
+              description: "フォルダ名(省略時はフォルダ一覧を表示)",
             },
           },
         },
@@ -87,8 +82,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             folder: {
               type: "string",
-              description:
-                "フォルダ名（省略時はカレントディレクトリ名）",
+              description: "フォルダ名(省略時はカレントディレクトリ名)",
             },
           },
         },
@@ -102,13 +96,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             folder: {
               type: "string",
-              description:
-                "フォルダ名（省略時はカレントディレクトリ名）",
+              description: "フォルダ名(省略時はカレントディレクトリ名)",
             },
             envContent: {
               type: "string",
-              description:
-                ".env 形式の内容（KEY=VALUE の改行区切り）",
+              description: ".env 形式の内容(KEY=VALUE の改行区切り)",
             },
           },
           required: ["envContent"],
@@ -126,8 +118,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             key: {
               type: "string",
-              description:
-                "削除するキー名（省略時はフォルダ全体を削除）",
+              description: "削除するキー名(省略時はフォルダ全体を削除)",
             },
           },
           required: ["folder"],
@@ -166,24 +157,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const projectId = args.projectId;
         const configFile = `${homedir()}/.secrets-manager.conf`;
 
-        // Secret Manager API 有効化
-        try {
-          runGcloud(
-            `services enable secretmanager.googleapis.com --project=${projectId}`
-          );
-        } catch (e) {
-          // 既に有効な場合は無視
-        }
-
         // 設定ファイル作成
-        const fs = await import("fs");
-        fs.writeFileSync(configFile, `SECRETS_CENTRAL_PROJECT=${projectId}\n`);
+        writeFileSync(configFile, `SECRETS_CENTRAL_PROJECT=${projectId}\n`);
 
         return {
           content: [
             {
               type: "text",
-              text: `設定完了: ${projectId}\n設定ファイル: ${configFile}`,
+              text: `設定完了: ${projectId}\n設定ファイル: ${configFile}\n\n注意: Secret Manager API が有効化されていることを確認してください。`,
             },
           ],
         };
@@ -203,28 +184,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const folder = args.folder;
+        const parent = `projects/${centralProject}`;
+
+        // シークレット一覧を取得
+        const [secrets] = await client.listSecrets({ parent });
 
         if (!folder) {
           // フォルダ一覧
-          const output = runGcloud(
-            `secrets list --project=${centralProject} --format="value(labels.folder)"`
-          );
-          const folders = [...new Set(output.split("\n").filter(Boolean))];
+          const folders = new Set();
+          for (const secret of secrets) {
+            const labels = secret.labels || {};
+            if (labels.folder) {
+              folders.add(labels.folder);
+            }
+          }
+          const folderList = [...folders].sort();
           return {
             content: [
               {
                 type: "text",
-                text: `フォルダ一覧:\n${folders.map((f) => `  ${f}/`).join("\n")}`,
+                text: `フォルダ一覧:\n${folderList.map((f) => `  ${f}/`).join("\n")}`,
               },
             ],
           };
         } else {
           // フォルダ内のシークレット一覧
-          const output = runGcloud(
-            `secrets list --project=${centralProject} --filter="labels.folder=${folder}" --format="value(name)"`
-          );
-          const secrets = output.split("\n").filter(Boolean);
-          const keys = secrets.map((s) => getKeyFromSecret(s));
+          const keys = [];
+          for (const secret of secrets) {
+            const labels = secret.labels || {};
+            if (labels.folder === folder) {
+              const secretName = secret.name.split("/").pop();
+              keys.push(getKeyFromSecret(secretName));
+            }
+          }
           return {
             content: [
               {
@@ -250,13 +242,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const folder = args.folder || currentFolder;
+        const parent = `projects/${centralProject}`;
 
-        // フォルダに属するシークレット一覧を取得
-        const secretsList = runGcloud(
-          `secrets list --project=${centralProject} --filter="labels.folder=${folder}" --format="value(name)"`
-        );
+        // シークレット一覧を取得
+        const [secrets] = await client.listSecrets({ parent });
 
-        if (!secretsList) {
+        // フォルダに属するシークレットをフィルタ
+        const folderSecrets = secrets.filter((secret) => {
+          const labels = secret.labels || {};
+          return labels.folder === folder;
+        });
+
+        if (folderSecrets.length === 0) {
           return {
             content: [
               {
@@ -267,16 +264,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const secrets = secretsList.split("\n").filter(Boolean);
-        const envLines = [];
+        // 全シークレットの値を並列で取得
+        const envLines = await Promise.all(
+          folderSecrets.map(async (secret) => {
+            const secretName = secret.name.split("/").pop();
+            const key = getKeyFromSecret(secretName);
 
-        for (const secretName of secrets) {
-          const key = getKeyFromSecret(secretName);
-          const value = runGcloud(
-            `secrets versions access latest --secret=${secretName} --project=${centralProject}`
-          );
-          envLines.push(`${key}=${value}`);
-        }
+            const [version] = await client.accessSecretVersion({
+              name: `${secret.name}/versions/latest`,
+            });
+
+            const value = version.payload.data.toString("utf8");
+            return `${key}=${value}`;
+          })
+        );
 
         return {
           content: [
@@ -301,7 +302,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const folder = args.folder || currentFolder;
+        const folderRaw = args.folder || currentFolder;
+        // フォルダ名を小文字に変換（GCP ラベル制約対応）
+        const folder = folderRaw.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
         const envContent = args.envContent;
 
         if (!envContent) {
@@ -316,7 +319,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const lines = envContent.split("\n");
+        // マルチライン値を解析（バッククォート対応）
+        const entries = [];
+        const multilineRegex = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*`([\s\S]*?)`/gm;
+        let remaining = envContent;
+        let multiMatch;
+
+        while ((multiMatch = multilineRegex.exec(envContent)) !== null) {
+          entries.push({ key: multiMatch[1], value: multiMatch[2] });
+          remaining = remaining.replace(multiMatch[0], '');
+        }
+
+        // 通常の単一行を解析
+        const lines = remaining.split("\n");
         let count = 0;
         const results = [];
 
@@ -324,42 +339,57 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // 空行とコメント行をスキップ
           if (!line.trim() || line.trim().startsWith("#")) continue;
 
-          const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+          // KEY = VALUE 形式も対応（行頭スペース、= 前後スペース許容）
+          const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
           if (match) {
             const key = match[1];
             let value = match[2];
 
             // クォートを除去
             value = value.replace(/^["']|["']$/g, "");
+            entries.push({ key, value });
+          }
+        }
+
+        // 全エントリをアップロード
+        for (const { key, value } of entries) {
 
             const secretName = makeSecretName(folder, key);
+            const secretPath = `projects/${centralProject}/secrets/${secretName}`;
 
             try {
               // シークレットが存在するか確認
-              runGcloud(
-                `secrets describe ${secretName} --project=${centralProject}`
-              );
+              await client.getSecret({ name: secretPath });
 
               // 新しいバージョンを追加
-              execSync(
-                `echo -n "${value}" | gcloud secrets versions add ${secretName} --data-file=- --project=${centralProject} --quiet`,
-                { encoding: "utf-8" }
-              );
+              await client.addSecretVersion({
+                parent: secretPath,
+                payload: { data: Buffer.from(value, "utf8") },
+              });
               results.push(`更新: ${key}`);
-            } catch {
-              // 新規作成
-              runGcloud(
-                `secrets create ${secretName} --replication-policy=automatic --labels=folder=${folder} --project=${centralProject} --quiet`
-              );
-              execSync(
-                `echo -n "${value}" | gcloud secrets versions add ${secretName} --data-file=- --project=${centralProject} --quiet`,
-                { encoding: "utf-8" }
-              );
-              results.push(`作成: ${key}`);
+            } catch (e) {
+              if (e.code === 5) {
+                // NOT_FOUND - 新規作成
+                await client.createSecret({
+                  parent: `projects/${centralProject}`,
+                  secretId: secretName,
+                  secret: {
+                    replication: { automatic: {} },
+                    labels: { folder },
+                  },
+                });
+
+                await client.addSecretVersion({
+                  parent: secretPath,
+                  payload: { data: Buffer.from(value, "utf8") },
+                });
+                results.push(`作成: ${key}`);
+              } else {
+                throw e;
+              }
             }
 
-            count++;
-          }
+          count++;
         }
 
         return {
@@ -403,9 +433,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (key) {
           // 特定のキーを削除
           const secretName = makeSecretName(folder, key);
-          runGcloud(
-            `secrets delete ${secretName} --project=${centralProject} --quiet`
-          );
+          await client.deleteSecret({
+            name: `projects/${centralProject}/secrets/${secretName}`,
+          });
           return {
             content: [
               {
@@ -416,11 +446,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         } else {
           // フォルダ全体を削除
-          const secretsList = runGcloud(
-            `secrets list --project=${centralProject} --filter="labels.folder=${folder}" --format="value(name)"`
-          );
+          const parent = `projects/${centralProject}`;
+          const [secrets] = await client.listSecrets({ parent });
 
-          if (!secretsList) {
+          const folderSecrets = secrets.filter((secret) => {
+            const labels = secret.labels || {};
+            return labels.folder === folder;
+          });
+
+          if (folderSecrets.length === 0) {
             return {
               content: [
                 {
@@ -431,18 +465,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             };
           }
 
-          const secrets = secretsList.split("\n").filter(Boolean);
-          for (const secretName of secrets) {
-            runGcloud(
-              `secrets delete ${secretName} --project=${centralProject} --quiet`
-            );
-          }
+          // 全シークレットを並列で削除
+          await Promise.all(
+            folderSecrets.map((secret) =>
+              client.deleteSecret({ name: secret.name })
+            )
+          );
 
           return {
             content: [
               {
                 type: "text",
-                text: `削除: ${folder}/ (${secrets.length}件)`,
+                text: `削除: ${folder}/ (${folderSecrets.length}件)`,
               },
             ],
           };
