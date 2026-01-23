@@ -1,6 +1,6 @@
 {
   "name": "@yhonda/gcloud-secrets",
-  "version": "2.0.8",
+  "version": "2.0.9",
   "description": "GCP Secret Manager を GitHub clone 風に管理する CLI ツール",
   "type": "module",
   "main": "cli.js",
