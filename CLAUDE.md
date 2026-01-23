@@ -11,6 +11,7 @@ gcloud-secrets list [folder] [--env <env>]          # フォルダ/シークレ�
 gcloud-secrets pull [folder] [--env <env>]          # シークレットを .env 形式で取得
 gcloud-secrets push [folder] [file] [--env <env>]   # .env をアップロード
 gcloud-secrets scan [basePath] [--env <env>]        # Git リポジトリの同期状況をスキャン
+gcloud-secrets search <keyword> [--env <env>]  # 値から逆引き検索
 ```
 
 ## Key Concepts
