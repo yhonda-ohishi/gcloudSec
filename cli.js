@@ -2,7 +2,7 @@
 
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { readFileSync, writeFileSync, existsSync, readdirSync, lstatSync } from "fs";
-import { basename, join, dirname } from "path";
+import { basename, join, dirname, resolve } from "path";
 import { homedir } from "os";
 import { execSync } from "child_process";
 
@@ -31,6 +31,14 @@ function makeSecretName(folder, key) {
 function getKeyFromSecret(secretName) {
   const parts = secretName.split("_");
   return parts.slice(1).join("_");
+}
+
+// フォルダ名を正規化 (camelCase → kebab-case)
+function normalizeFolder(name) {
+  return name
+    .replace(/([a-z])([A-Z])/g, '$1-$2')  // camelCase → kebab-case
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '-');
 }
 
 // Git リポジトリを再帰的に検索
@@ -157,7 +165,7 @@ async function runCli(args) {
       }
 
       case "pull": {
-        const folder = args[1] || basename(process.cwd());
+        const folder = normalizeFolder(args[1] || basename(process.cwd()));
         const parent = `projects/${config.centralProject}`;
         const [secrets] = await client.listSecrets({ parent });
 
@@ -182,7 +190,7 @@ async function runCli(args) {
       }
 
       case "push": {
-        const folder = args[1] || basename(process.cwd());
+        const folder = normalizeFolder(args[1] || basename(process.cwd()));
         const envFile = args[2] || ".env";
 
         if (!existsSync(envFile)) {
@@ -251,8 +259,8 @@ async function runCli(args) {
           const envFiles = findEnvFiles(repoPath);
           if (envFiles.length === 0) continue;
 
-          const repoName = basename(repoPath);
-          const normalizedFolder = repoName.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+          const repoName = basename(resolve(repoPath));
+          const normalizedFolder = normalizeFolder(repoName);
 
           for (const envFile of envFiles) {
             let content;
