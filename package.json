@@ -1,6 +1,6 @@
 {
   "name": "@yhonda/gcloud-secrets",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "GCP Secret Manager を GitHub clone 風に管理する CLI ツール",
   "type": "module",
   "main": "cli.js",
@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "start": "node cli.js",
-    "postinstall": "node install-skills.js"
+    "postinstall": "node install-skills.js",
+    "prepare": "husky"
   },
   "repository": {
     "type": "git",
@@ -42,5 +43,8 @@
   "homepage": "https://github.com/yhonda-ohishi/gcloudSec#readme",
   "dependencies": {
     "@google-cloud/secret-manager": "^6.1.1"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
   }
 }

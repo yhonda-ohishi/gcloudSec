@@ -1,0 +1,10 @@
+#!/bin/sh
+
+# バージョンが変更されている場合のみ npm publish を実行
+CURRENT_VERSION=$(node -p "require('./package.json').version")
+NPM_VERSION=$(npm view @yhonda/gcloud-secrets version 2>/dev/null || echo "0.0.0")
+
+if [ "$CURRENT_VERSION" != "$NPM_VERSION" ]; then
+  echo "Publishing @yhonda/gcloud-secrets@$CURRENT_VERSION to npm..."
+  npm publish
+fi
