@@ -1,5 +1,10 @@
 #!/bin/sh
 
+# 再帰防止
+if [ "$GCLOUD_SECRETS_PUSHING" = "1" ]; then
+  exit 0
+fi
+
 # タグのみのプッシュはスキップ
 while read local_ref local_sha remote_ref remote_sha; do
   if echo "$local_ref" | grep -q "^refs/tags/"; then
@@ -11,14 +16,19 @@ done
 CURRENT_VERSION=$(node -p "require('./package.json').version")
 NPM_VERSION=$(curl -s "https://registry.npmjs.org/@yhonda%2fgcloud-secrets/latest" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "0.0.0")
 
-# バージョンが同じなら自動でpatch上げ
+# バージョンが同じなら自動でpatch上げて再push
 if [ "$CURRENT_VERSION" = "$NPM_VERSION" ]; then
   echo "Auto-bumping patch version..."
   npm version patch --no-git-tag-version
   git add package.json package-lock.json
-  git commit --amend --no-edit
+  git commit -m "v$(node -p "require('./package.json').version")"
   CURRENT_VERSION=$(node -p "require('./package.json').version")
+  echo "Version bumped to $CURRENT_VERSION. Re-pushing..."
+  # 再帰防止フラグ付きで再push
+  GCLOUD_SECRETS_PUSHING=1 git push
+  # 元のpushを中止 (新しいコミットは既にpush済み)
+  exit 1
 fi
 
 echo "Publishing @yhonda/gcloud-secrets@$CURRENT_VERSION to npm..."
-npm publish && git tag "v$CURRENT_VERSION" && git push origin "v$CURRENT_VERSION"
+npm publish && git tag "v$CURRENT_VERSION" && GCLOUD_SECRETS_PUSHING=1 git push origin "v$CURRENT_VERSION"
