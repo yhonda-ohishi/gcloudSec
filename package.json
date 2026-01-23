@@ -1,29 +1,32 @@
 {
-  "name": "@yhonda/gcloud-secrets-mcp",
-  "version": "1.0.2",
-  "description": "GCP Secret Manager を GitHub clone 風に管理する MCP サーバー",
+  "name": "@yhonda/gcloud-secrets",
+  "version": "2.0.0",
+  "description": "GCP Secret Manager を GitHub clone 風に管理する CLI ツール",
   "type": "module",
-  "main": "mcp-server.js",
+  "main": "cli.js",
   "bin": {
-    "gcloud-secrets-mcp": "mcp-server.js"
+    "gcloud-secrets": "cli.js"
   },
   "files": [
-    "mcp-server.js",
+    "cli.js",
+    "skills/",
+    "install-skills.js",
     "README.md"
   ],
   "scripts": {
-    "start": "node mcp-server.js"
+    "start": "node cli.js",
+    "postinstall": "node install-skills.js"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yhonda-ohishi/gcloudSec.git"
   },
   "keywords": [
-    "mcp",
     "gcp",
     "secret-manager",
     "env",
-    "claude-code"
+    "claude-code",
+    "cli"
   ],
   "author": "yhonda",
   "license": "ISC",
@@ -38,7 +41,6 @@
   },
   "homepage": "https://github.com/yhonda-ohishi/gcloudSec#readme",
   "dependencies": {
-    "@google-cloud/secret-manager": "^6.1.1",
-    "@modelcontextprotocol/sdk": "^1.25.2"
+    "@google-cloud/secret-manager": "^6.1.1"
   }
 }
