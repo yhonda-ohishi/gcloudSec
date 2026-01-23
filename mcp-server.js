@@ -507,10 +507,160 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+// CLI モード
+async function runCli(args) {
+  const command = args[0];
+  const config = getConfig();
+
+  if (!config.centralProject && command !== "init") {
+    console.error("エラー: 先に init を実行してください");
+    process.exit(1);
+  }
+
+  try {
+    switch (command) {
+      case "init": {
+        const projectId = args[1];
+        if (!projectId) {
+          console.error("使い方: gcloud-secrets-mcp init <project-id>");
+          process.exit(1);
+        }
+        const configFile = `${homedir()}/.secrets-manager.conf`;
+        writeFileSync(configFile, `SECRETS_CENTRAL_PROJECT=${projectId}\n`);
+        console.log(`設定完了: ${projectId}`);
+        break;
+      }
+
+      case "list": {
+        const folder = args[1];
+        const parent = `projects/${config.centralProject}`;
+        const [secrets] = await client.listSecrets({ parent });
+
+        if (!folder) {
+          const folders = new Set();
+          for (const secret of secrets) {
+            const name = secret.name.split("/").pop();
+            const [labels] = await client.getSecret({ name: secret.name });
+            if (labels.labels?.folder) {
+              folders.add(labels.labels.folder);
+            }
+          }
+          console.log("フォルダ一覧:");
+          for (const f of folders) {
+            console.log(`  ${f}`);
+          }
+        } else {
+          console.log(`${folder} のシークレット:`);
+          for (const secret of secrets) {
+            const [secretData] = await client.getSecret({ name: secret.name });
+            if (secretData.labels?.folder === folder) {
+              const key = getKeyFromSecret(secret.name.split("/").pop());
+              console.log(`  ${key}`);
+            }
+          }
+        }
+        break;
+      }
+
+      case "pull": {
+        const folder = args[1] || basename(process.cwd());
+        const parent = `projects/${config.centralProject}`;
+        const [secrets] = await client.listSecrets({ parent });
+
+        const envLines = [];
+        for (const secret of secrets) {
+          const [secretData] = await client.getSecret({ name: secret.name });
+          if (secretData.labels?.folder === folder) {
+            const key = getKeyFromSecret(secret.name.split("/").pop());
+            const [version] = await client.accessSecretVersion({
+              name: `${secret.name}/versions/latest`,
+            });
+            const value = version.payload.data.toString("utf-8");
+            if (value.includes("\n")) {
+              envLines.push(`${key}=\`${value}\``);
+            } else {
+              envLines.push(`${key}=${value}`);
+            }
+          }
+        }
+        console.log(envLines.join("\n"));
+        break;
+      }
+
+      case "push": {
+        const folder = args[1] || basename(process.cwd());
+        const envFile = args[2] || ".env";
+
+        if (!existsSync(envFile)) {
+          console.error(`ファイルが見つかりません: ${envFile}`);
+          process.exit(1);
+        }
+
+        const content = readFileSync(envFile, "utf-8");
+        const lines = content.split("\n");
+        const parent = `projects/${config.centralProject}`;
+        let count = 0;
+
+        for (const line of lines) {
+          if (!line.trim() || line.startsWith("#")) continue;
+          const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/i);
+          if (match) {
+            const [, key, value] = match;
+            const secretId = makeSecretName(folder, key);
+            const secretName = `${parent}/secrets/${secretId}`;
+
+            try {
+              await client.getSecret({ name: secretName });
+              await client.addSecretVersion({
+                parent: secretName,
+                payload: { data: Buffer.from(value) },
+              });
+            } catch {
+              await client.createSecret({
+                parent,
+                secretId,
+                secret: { replication: { automatic: {} }, labels: { folder } },
+              });
+              await client.addSecretVersion({
+                parent: secretName,
+                payload: { data: Buffer.from(value) },
+              });
+            }
+            count++;
+          }
+        }
+        console.log(`${count} 件のシークレットをアップロードしました (${folder})`);
+        break;
+      }
+
+      default:
+        console.log(`gcloud-secrets-mcp - GCP Secret Manager CLI
+
+使い方:
+  gcloud-secrets-mcp init <project-id>   中央プロジェクトを設定
+  gcloud-secrets-mcp list [folder]       一覧表示
+  gcloud-secrets-mcp pull [folder]       シークレットを取得
+  gcloud-secrets-mcp push [folder] [file] シークレットをアップロード
+`);
+    }
+  } catch (error) {
+    console.error(`エラー: ${error.message}`);
+    process.exit(1);
+  }
+}
+
 // サーバー起動
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const args = process.argv.slice(2);
+
+  if (args.length > 0) {
+    // CLI モード
+    await runCli(args);
+  } else {
+    // MCP サーバーモード
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  }
 }
 
 main().catch(console.error);

@@ -1,6 +1,8 @@
-# secrets - GitHub clone風 Secret Manager CLI
+# @yhonda/gcloud-secrets-mcp
 
 複数の GCP プロジェクトの `.env` / `.dev.vars` を1つの Secret Manager で一元管理する CLI ツール。
+
+Claude Code のスキルとしても利用可能。
 
 ## 概要
 
@@ -9,7 +11,7 @@ Secret Manager (中央プロジェクト)
 ├── project-a/
 │   ├── DATABASE_URL
 │   ├── API_KEY
-│   └── CLOUDFLARE_SECRET   ← 元は .dev.vars
+│   └── CLOUDFLARE_SECRET
 ├── project-b/
 │   ├── DATABASE_URL
 │   └── STRIPE_KEY
@@ -20,133 +22,75 @@ Secret Manager (中央プロジェクト)
 ## インストール
 
 ```bash
-# クローン
-git clone <this-repo>
-cd gcloudSec
+# ~/bin にインストール
+mkdir -p ~/bin && cd ~/bin
+npm install @yhonda/gcloud-secrets-mcp
+ln -sf ~/bin/node_modules/.bin/gcloud-secrets-mcp ~/bin/gcloud-secrets-mcp
 
-# 実行権限付与
-chmod +x secrets
-
-# PATH に追加（オプション）
-sudo ln -s $(pwd)/secrets /usr/local/bin/secrets
+# PATH に追加 (~/.bashrc または ~/.zshrc)
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
 ```
 
 ### 前提条件
 
-- gcloud CLI がインストール済み
-- `gcloud auth login` で認証済み
+- Node.js 18 以上
+- GCP 認証済み（`gcloud auth application-default login`）
 
 ## 初期設定
 
 ```bash
-secrets init
-# → 中央管理用の GCP プロジェクトID を入力
+gcloud-secrets-mcp init <project-id>
 ```
 
 設定は `~/.secrets-manager.conf` に保存されます。
 
-## 使い方
-
-### Push: ローカル → Secret Manager
-
-```bash
-# カレントディレクトリの .env または .dev.vars を自動検出
-secrets push my-project
-
-# ファイルを指定
-secrets push my-project .dev.vars
-secrets push my-project .env.local
-```
-
-### Pull: Secret Manager → ローカル
-
-```bash
-# 標準出力に出力
-secrets pull my-project
-
-# ファイルに保存
-secrets pull my-project .env
-secrets pull my-project .dev.vars
-
-# git clone 風（.env として保存）
-secrets clone my-project
-```
-
-### 一覧表示
+## CLI 使い方
 
 ```bash
 # フォルダ一覧
-secrets list
+gcloud-secrets-mcp list
 
-# フォルダ内のキー一覧
-secrets list my-project
+# フォルダ内のシークレット一覧
+gcloud-secrets-mcp list my-project
+
+# シークレットを取得（.env形式で標準出力）
+gcloud-secrets-mcp pull my-project
+
+# シークレットをアップロード
+gcloud-secrets-mcp push my-project .env
 ```
 
-### 差分確認
+## Claude Code スキル
 
-```bash
-# ローカルとリモートの差分
-secrets diff my-project
+`~/.claude/commands/secrets.md` を作成すると `/secrets` コマンドが使えます:
+
+```markdown
+# GCP Secret Manager スキル
+
+ユーザーの指示に従って以下のコマンドを実行:
+
+- `~/bin/gcloud-secrets-mcp list` - フォルダ一覧
+- `~/bin/gcloud-secrets-mcp list <folder>` - シークレット一覧
+- `~/bin/gcloud-secrets-mcp pull <folder>` - 取得
+- `~/bin/gcloud-secrets-mcp push <folder> <file>` - アップロード
 ```
 
-### 削除
+### 使用例
 
-```bash
-# 特定のキーを削除
-secrets delete my-project API_KEY
+Claude に以下のように依頼できます:
 
-# フォルダ全体を削除
-secrets delete my-project
-```
-
-## 利用例
-
-### Cloudflare Workers プロジェクト
-
-```bash
-cd ~/projects/my-worker
-
-# .dev.vars をアップロード
-secrets push my-worker .dev.vars
-
-# 別マシンで取得
-secrets pull my-worker .dev.vars
-```
-
-### Node.js / Next.js プロジェクト
-
-```bash
-cd ~/projects/my-app
-
-# .env.local をアップロード
-secrets push my-app .env.local
-
-# 取得
-secrets clone my-app
-mv .env .env.local
-```
-
-### 複数環境の管理
-
-```bash
-# 開発環境
-secrets push myapp-dev .env
-
-# 本番環境
-secrets push myapp-prod .env.production
-```
+- `/secrets list`
+- `/secrets pull my-project`
+- 「このプロジェクトの .env を Secret Manager にアップロードして」
 
 ## コマンド一覧
 
 | コマンド | 説明 |
 |---------|------|
-| `secrets init` | 初期設定 |
-| `secrets push <folder> [file]` | アップロード |
-| `secrets pull <folder> [file]` | ダウンロード |
-| `secrets clone <folder> [dir]` | git clone 風にダウンロード |
-| `secrets list [folder]` | 一覧表示 |
-| `secrets delete <folder> [key]` | 削除 |
-| `secrets diff <folder> [file]` | 差分表示 |
+| `init <project-id>` | 中央プロジェクトを設定 |
+| `list [folder]` | 一覧表示 |
+| `pull [folder]` | シークレットを取得 |
+| `push [folder] [file]` | アップロード |
 
 ## 設定
 
@@ -159,65 +103,6 @@ export SECRETS_CENTRAL_PROJECT=your-project-id
 # または設定ファイル (~/.secrets-manager.conf)
 SECRETS_CENTRAL_PROJECT=your-project-id
 ```
-
-## 他プロジェクトからのアクセス許可
-
-子プロジェクトのサービスアカウントに読み取り権限を付与:
-
-```bash
-gcloud secrets add-iam-policy-binding "myapp_DATABASE_URL" \
-  --member="serviceAccount:sa@child-project.iam.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor" \
-  --project=central-project
-```
-
-## MCP サーバー (Claude Code 連携)
-
-Claude Code から直接シークレットを操作できます。
-
-### インストール
-
-```bash
-cd gcloudSec
-npm install
-```
-
-### Claude Code に登録
-
-```bash
-claude mcp add gcloud-secrets node /root/gcloudSec/mcp-server.js
-```
-
-または `~/.claude/settings.json` に直接追加:
-
-```json
-{
-  "mcpServers": {
-    "gcloud-secrets": {
-      "command": "node",
-      "args": ["/root/gcloudSec/mcp-server.js"]
-    }
-  }
-}
-```
-
-### 利用可能なツール
-
-| ツール | 説明 |
-|--------|------|
-| `secrets_init` | 中央プロジェクトを設定 |
-| `secrets_list` | フォルダ/シークレット一覧 |
-| `secrets_pull` | シークレットを .env 形式で取得 |
-| `secrets_push` | .env 内容をアップロード |
-| `secrets_delete` | シークレット削除 |
-
-### 使用例
-
-Claude に以下のように依頼できます:
-
-- 「このプロジェクトの .env を Secret Manager にアップロードして」
-- 「my-project のシークレットを取得して」
-- 「Secret Manager のフォルダ一覧を見せて」
 
 ## ライセンス
 
