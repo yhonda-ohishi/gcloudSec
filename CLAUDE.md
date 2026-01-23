@@ -6,14 +6,20 @@ GCP Secret Manager を GitHub clone 風に管理する CLI ツール。
 
 ## Commands
 ```bash
-gcloud-secrets init <project-id>   # 中央プロジェクトを設定
-gcloud-secrets list [folder]       # フォルダ/シークレット一覧
-gcloud-secrets pull [folder]       # シークレットを .env 形式で取得
-gcloud-secrets push [folder] [file] # .env をアップロード
-gcloud-secrets scan [basePath]     # Git リポジトリの同期状況をスキャン
+gcloud-secrets init <project-id> [--env <default>]  # 中央プロジェクトを設定
+gcloud-secrets list [folder] [--env <env>]          # フォルダ/シークレット一覧
+gcloud-secrets pull [folder] [--env <env>]          # シークレットを .env 形式で取得
+gcloud-secrets push [folder] [file] [--env <env>]   # .env をアップロード
+gcloud-secrets scan [basePath] [--env <env>]        # Git リポジトリの同期状況をスキャン
 ```
 
 ## Key Concepts
+
+### Environment (環境)
+`--env` または `-e` で環境を指定できる:
+- `gcloud-secrets push --env dev` → dev 環境にアップロード
+- `gcloud-secrets pull -e prod` → prod 環境から取得
+- デフォルト環境は `~/.secrets-manager.conf` の `DEFAULT_ENVIRONMENT` で設定
 
 ### Folder Naming
 フォルダ名は自動で正規化される (camelCase → kebab-case):
@@ -21,7 +27,7 @@ gcloud-secrets scan [basePath]     # Git リポジトリの同期状況をスキ
 - `myAppTest` → `my-app-test`
 
 ### Secret Naming
-シークレット名: `{folder}_{KEY}` (例: `gcloud-sec_DATABASE_URL`)
+シークレット名: `{folder}_{env}_{KEY}` (例: `gcloud-sec_dev_DATABASE_URL`)
 
 ### Scan Status
 - `[OK]` - 登録済み、ローカルとリモートが一致

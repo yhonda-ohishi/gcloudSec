@@ -9,28 +9,64 @@ import { execSync } from "child_process";
 // SDK クライアント初期化
 const client = new SecretManagerServiceClient();
 
+// 引数パース (--env / -e オプション抽出)
+function parseArgs(args) {
+  const result = { positional: [], env: null };
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--env' || args[i] === '-e') {
+      result.env = args[i + 1];
+      i++;
+    } else if (args[i].startsWith('--env=')) {
+      result.env = args[i].split('=')[1];
+    } else {
+      result.positional.push(args[i]);
+    }
+  }
+  return result;
+}
+
 // 設定読み込み
 function getConfig() {
   const configFile = `${homedir()}/.secrets-manager.conf`;
+  const config = {
+    centralProject: process.env.SECRETS_CENTRAL_PROJECT || "",
+    defaultEnvironment: process.env.DEFAULT_ENVIRONMENT || "dev"
+  };
   if (existsSync(configFile)) {
     const content = readFileSync(configFile, "utf-8");
-    const match = content.match(/SECRETS_CENTRAL_PROJECT=(.+)/);
-    if (match) {
-      return { centralProject: match[1].trim() };
+    const projectMatch = content.match(/SECRETS_CENTRAL_PROJECT=(.+)/);
+    if (projectMatch) {
+      config.centralProject = projectMatch[1].trim();
+    }
+    const envMatch = content.match(/DEFAULT_ENVIRONMENT=(.+)/);
+    if (envMatch) {
+      config.defaultEnvironment = envMatch[1].trim();
     }
   }
-  return { centralProject: process.env.SECRETS_CENTRAL_PROJECT || "" };
+  return config;
 }
 
-// シークレット名生成
-function makeSecretName(folder, key) {
+// シークレット名生成 (環境対応)
+function makeSecretName(folder, key, env = null) {
+  if (env) {
+    return `${folder}_${env}_${key}`;
+  }
   return `${folder}_${key}`;
 }
 
-// シークレット名からキーを抽出
-function getKeyFromSecret(secretName) {
-  const parts = secretName.split("_");
-  return parts.slice(1).join("_");
+// シークレット名からキーと環境を抽出
+function getKeyFromSecret(secretName, folderName) {
+  const prefix = folderName + "_";
+  if (!secretName.startsWith(prefix)) {
+    return { key: secretName, env: null };
+  }
+  const rest = secretName.slice(prefix.length);
+  const parts = rest.split("_");
+  // 2つ以上のパートがあり、最初がアルファベット小文字のみなら環境名と判断
+  if (parts.length >= 2 && /^[a-z]+$/.test(parts[0])) {
+    return { key: parts.slice(1).join("_"), env: parts[0] };
+  }
+  return { key: rest, env: null };
 }
 
 // フォルダ名を正規化 (camelCase → kebab-case)
@@ -112,8 +148,10 @@ function compareValues(a, b) {
 
 // CLI モード
 async function runCli(args) {
-  const command = args[0];
+  const parsed = parseArgs(args);
+  const command = parsed.positional[0];
   const config = getConfig();
+  const targetEnv = parsed.env || config.defaultEnvironment;
 
   if (!config.centralProject && command !== "init") {
     console.error("エラー: 先に init を実行してください");
@@ -123,40 +161,49 @@ async function runCli(args) {
   try {
     switch (command) {
       case "init": {
-        const projectId = args[1];
+        const projectId = parsed.positional[1];
+        const defaultEnv = parsed.env || "dev";
         if (!projectId) {
-          console.error("使い方: gcloud-secrets init <project-id>");
+          console.error("使い方: gcloud-secrets init <project-id> [--env <default-env>]");
           process.exit(1);
         }
         const configFile = `${homedir()}/.secrets-manager.conf`;
-        writeFileSync(configFile, `SECRETS_CENTRAL_PROJECT=${projectId}\n`);
-        console.log(`設定完了: ${projectId}`);
+        const configContent = `SECRETS_CENTRAL_PROJECT=${projectId}\nDEFAULT_ENVIRONMENT=${defaultEnv}\n`;
+        writeFileSync(configFile, configContent);
+        console.log(`設定完了: ${projectId} (デフォルト環境: ${defaultEnv})`);
         break;
       }
 
       case "list": {
-        const folder = args[1];
+        const folder = parsed.positional[1];
         const parent = `projects/${config.centralProject}`;
         const [secrets] = await client.listSecrets({ parent });
 
         if (!folder) {
-          const folders = new Set();
+          // フォルダ一覧 (環境ごとにグループ化)
+          const folderEnvs = new Map();
           for (const secret of secrets) {
-            const [labels] = await client.getSecret({ name: secret.name });
-            if (labels.labels?.folder) {
-              folders.add(labels.labels.folder);
+            const [secretData] = await client.getSecret({ name: secret.name });
+            if (secretData.labels?.folder) {
+              const f = secretData.labels.folder;
+              const e = secretData.labels?.environment || "(default)";
+              if (!folderEnvs.has(f)) folderEnvs.set(f, new Set());
+              folderEnvs.get(f).add(e);
             }
           }
           console.log("フォルダ一覧:");
-          for (const f of folders) {
-            console.log(`  ${f}`);
+          for (const [f, envs] of folderEnvs) {
+            const envList = Array.from(envs).sort().join(', ');
+            console.log(`  ${f} [${envList}]`);
           }
         } else {
-          console.log(`${folder} のシークレット:`);
+          // 特定フォルダのシークレット一覧 (環境でフィルタ)
+          console.log(`${folder} (${targetEnv}) のシークレット:`);
           for (const secret of secrets) {
             const [secretData] = await client.getSecret({ name: secret.name });
-            if (secretData.labels?.folder === folder) {
-              const key = getKeyFromSecret(secret.name.split("/").pop());
+            const secretEnv = secretData.labels?.environment || null;
+            if (secretData.labels?.folder === folder && secretEnv === targetEnv) {
+              const { key } = getKeyFromSecret(secret.name.split("/").pop(), folder);
               console.log(`  ${key}`);
             }
           }
@@ -165,15 +212,16 @@ async function runCli(args) {
       }
 
       case "pull": {
-        const folder = normalizeFolder(args[1] || basename(process.cwd()));
+        const folder = normalizeFolder(parsed.positional[1] || basename(process.cwd()));
         const parent = `projects/${config.centralProject}`;
         const [secrets] = await client.listSecrets({ parent });
 
         const envLines = [];
         for (const secret of secrets) {
           const [secretData] = await client.getSecret({ name: secret.name });
-          if (secretData.labels?.folder === folder) {
-            const key = getKeyFromSecret(secret.name.split("/").pop());
+          const secretEnv = secretData.labels?.environment || null;
+          if (secretData.labels?.folder === folder && secretEnv === targetEnv) {
+            const { key } = getKeyFromSecret(secret.name.split("/").pop(), folder);
             const [version] = await client.accessSecretVersion({
               name: `${secret.name}/versions/latest`,
             });
@@ -185,13 +233,17 @@ async function runCli(args) {
             }
           }
         }
-        console.log(envLines.join("\n"));
+        if (envLines.length === 0) {
+          console.error(`警告: ${folder} (${targetEnv}) にシークレットが見つかりません`);
+        } else {
+          console.log(envLines.join("\n"));
+        }
         break;
       }
 
       case "push": {
-        const folder = normalizeFolder(args[1] || basename(process.cwd()));
-        const envFile = args[2] || ".env";
+        const folder = normalizeFolder(parsed.positional[1] || basename(process.cwd()));
+        const envFile = parsed.positional[2] || ".env";
 
         if (!existsSync(envFile)) {
           console.error(`ファイルが見つかりません: ${envFile}`);
@@ -201,6 +253,7 @@ async function runCli(args) {
         const content = readFileSync(envFile, "utf-8");
         const lines = content.split("\n");
         const parent = `projects/${config.centralProject}`;
+        const labels = { folder, environment: targetEnv };
         let count = 0;
 
         for (const line of lines) {
@@ -208,11 +261,16 @@ async function runCli(args) {
           const match = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/i);
           if (match) {
             const [, key, value] = match;
-            const secretId = makeSecretName(folder, key);
+            const secretId = makeSecretName(folder, key, targetEnv);
             const secretName = `${parent}/secrets/${secretId}`;
 
             try {
               await client.getSecret({ name: secretName });
+              // 既存シークレットのラベルも更新
+              await client.updateSecret({
+                secret: { name: secretName, labels },
+                updateMask: { paths: ['labels'] }
+              });
               await client.addSecretVersion({
                 parent: secretName,
                 payload: { data: Buffer.from(value) },
@@ -221,7 +279,7 @@ async function runCli(args) {
               await client.createSecret({
                 parent,
                 secretId,
-                secret: { replication: { automatic: {} }, labels: { folder } },
+                secret: { replication: { automatic: {} }, labels },
               });
               await client.addSecretVersion({
                 parent: secretName,
@@ -231,24 +289,27 @@ async function runCli(args) {
             count++;
           }
         }
-        console.log(`${count} 件のシークレットをアップロードしました (${folder})`);
+        console.log(`${count} 件のシークレットをアップロードしました (${folder}/${targetEnv})`);
         break;
       }
 
       case "scan": {
-        const basePath = args[1] || homedir();
+        const basePath = parsed.positional[1] || homedir();
+        const filterEnv = parsed.env; // null の場合は全環境を表示
         const repos = findGitRepositories(basePath, 5);
         const parent = `projects/${config.centralProject}`;
         const [allSecrets] = await client.listSecrets({ parent });
 
-        // フォルダごとにグループ化
-        const secretsByFolder = new Map();
+        // フォルダ+環境ごとにグループ化
+        const secretsByFolderEnv = new Map();
         for (const secret of allSecrets) {
           const [secretData] = await client.getSecret({ name: secret.name });
           const f = secretData.labels?.folder;
+          const e = secretData.labels?.environment || null;
           if (f) {
-            if (!secretsByFolder.has(f)) secretsByFolder.set(f, []);
-            secretsByFolder.get(f).push(secret);
+            const key = `${f}|${e || ''}`;
+            if (!secretsByFolderEnv.has(key)) secretsByFolderEnv.set(key, []);
+            secretsByFolderEnv.get(key).push({ secret, env: e });
           }
         }
 
@@ -270,51 +331,64 @@ async function runCli(args) {
             const localEntries = parseEnvFile(content);
             if (localEntries.length === 0) continue;
 
-            const folderSecrets = secretsByFolder.get(normalizedFolder) || [];
+            // 環境フィルタがある場合はその環境のみ、なければ全環境をチェック
+            const envsToCheck = filterEnv ? [filterEnv] : [null, ...Array.from(new Set(
+              Array.from(secretsByFolderEnv.keys())
+                .filter(k => k.startsWith(normalizedFolder + '|'))
+                .map(k => k.split('|')[1])
+                .filter(Boolean)
+            ))];
 
-            if (folderSecrets.length === 0) {
-              results.push({ status: "NEW", repo: repoName, file: envFile.filename, keyCount: localEntries.length, gitIgnored: envFile.gitIgnored });
-              newCount++;
-              continue;
-            }
+            for (const checkEnv of envsToCheck) {
+              const mapKey = `${normalizedFolder}|${checkEnv || ''}`;
+              const folderSecrets = secretsByFolderEnv.get(mapKey) || [];
+              const envLabel = checkEnv || "(default)";
 
-            // リモート値取得・比較
-            let hasDiff = false;
-            const remoteKeys = new Set();
-            const remoteValues = new Map();
-
-            for (const secret of folderSecrets) {
-              const key = getKeyFromSecret(secret.name.split('/').pop());
-              remoteKeys.add(key);
-              try {
-                const [version] = await client.accessSecretVersion({ name: `${secret.name}/versions/latest` });
-                remoteValues.set(key, version.payload.data.toString('utf8'));
-              } catch { }
-            }
-
-            for (const entry of localEntries) {
-              if (!remoteKeys.has(entry.key) || !compareValues(entry.value, remoteValues.get(entry.key) || '')) {
-                hasDiff = true;
-                break;
+              if (folderSecrets.length === 0) {
+                results.push({ status: "NEW", repo: repoName, file: envFile.filename, env: envLabel, keyCount: localEntries.length, gitIgnored: envFile.gitIgnored });
+                newCount++;
+                continue;
               }
-            }
-            if (!hasDiff) {
-              for (const key of remoteKeys) {
-                if (!localEntries.find(e => e.key === key)) { hasDiff = true; break; }
-              }
-            }
 
-            if (hasDiff) {
-              results.push({ status: "DIFF", repo: repoName, file: envFile.filename, keyCount: localEntries.length, gitIgnored: envFile.gitIgnored });
-              diffCount++;
-            } else {
-              results.push({ status: "OK", repo: repoName, file: envFile.filename, keyCount: localEntries.length, gitIgnored: envFile.gitIgnored });
-              syncedCount++;
+              // リモート値取得・比較
+              let hasDiff = false;
+              const remoteKeys = new Set();
+              const remoteValues = new Map();
+
+              for (const { secret } of folderSecrets) {
+                const { key } = getKeyFromSecret(secret.name.split('/').pop(), normalizedFolder);
+                remoteKeys.add(key);
+                try {
+                  const [version] = await client.accessSecretVersion({ name: `${secret.name}/versions/latest` });
+                  remoteValues.set(key, version.payload.data.toString('utf8'));
+                } catch { }
+              }
+
+              for (const entry of localEntries) {
+                if (!remoteKeys.has(entry.key) || !compareValues(entry.value, remoteValues.get(entry.key) || '')) {
+                  hasDiff = true;
+                  break;
+                }
+              }
+              if (!hasDiff) {
+                for (const key of remoteKeys) {
+                  if (!localEntries.find(e => e.key === key)) { hasDiff = true; break; }
+                }
+              }
+
+              if (hasDiff) {
+                results.push({ status: "DIFF", repo: repoName, file: envFile.filename, env: envLabel, keyCount: localEntries.length, gitIgnored: envFile.gitIgnored });
+                diffCount++;
+              } else {
+                results.push({ status: "OK", repo: repoName, file: envFile.filename, env: envLabel, keyCount: localEntries.length, gitIgnored: envFile.gitIgnored });
+                syncedCount++;
+              }
             }
           }
         }
 
-        console.log("=== Secret Manager 同期状況 ===\n");
+        const envSuffix = filterEnv ? ` (${filterEnv})` : "";
+        console.log(`=== Secret Manager 同期状況${envSuffix} ===\n`);
         if (results.length === 0) {
           console.log(".env / .dev.vars ファイルが見つかりませんでした");
         } else {
@@ -322,7 +396,7 @@ async function runCli(args) {
             const label = r.status === "OK" ? "[OK]  " : r.status === "DIFF" ? "[DIFF]" : "[NEW] ";
             const suffix = r.status === "DIFF" ? " - 差分あり" : r.status === "NEW" ? " - 未登録" : "";
             const warn = !r.gitIgnored ? " ⚠" : "";
-            console.log(`${label} ${r.repo}/ ${r.file} (${r.keyCount} keys)${suffix}${warn}`);
+            console.log(`${label} ${r.repo}/ ${r.file} [${r.env}] (${r.keyCount} keys)${suffix}${warn}`);
           }
           console.log(`\n---\n合計: ${results.length} ファイル`);
           console.log(`  登録済み: ${syncedCount}`);
@@ -338,11 +412,15 @@ async function runCli(args) {
         console.log(`gcloud-secrets - GCP Secret Manager CLI
 
 使い方:
-  gcloud-secrets init <project-id>   中央プロジェクトを設定
-  gcloud-secrets list [folder]       一覧表示
-  gcloud-secrets pull [folder]       シークレットを取得
-  gcloud-secrets push [folder] [file] シークレットをアップロード
-  gcloud-secrets scan [basePath]     Git リポジトリの .env 同期状況をスキャン
+  gcloud-secrets init <project-id> [--env <default>]  中央プロジェクトを設定
+  gcloud-secrets list [folder] [--env <env>]          一覧表示
+  gcloud-secrets pull [folder] [--env <env>]          シークレットを取得
+  gcloud-secrets push [folder] [file] [--env <env>]   シークレットをアップロード
+  gcloud-secrets scan [basePath] [--env <env>]        Git リポジトリの .env 同期状況をスキャン
+
+オプション:
+  --env, -e <env>  環境を指定 (dev, staging, prod など)
+                   省略時は設定ファイルの DEFAULT_ENVIRONMENT を使用
 `);
     }
   } catch (error) {
