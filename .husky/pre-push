@@ -7,11 +7,18 @@ while read local_ref local_sha remote_ref remote_sha; do
   fi
 done
 
-# バージョンが変更されている場合のみ npm publish を実行
+# npmレジストリから直接バージョン取得
 CURRENT_VERSION=$(node -p "require('./package.json').version")
-NPM_VERSION=$(npm view @yhonda/gcloud-secrets version 2>/dev/null || echo "0.0.0")
+NPM_VERSION=$(curl -s "https://registry.npmjs.org/@yhonda%2fgcloud-secrets/latest" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "0.0.0")
 
-if [ "$CURRENT_VERSION" != "$NPM_VERSION" ]; then
-  echo "Publishing @yhonda/gcloud-secrets@$CURRENT_VERSION to npm..."
-  npm publish && git tag "v$CURRENT_VERSION" && git push origin "v$CURRENT_VERSION"
+# バージョンが同じなら自動でpatch上げ
+if [ "$CURRENT_VERSION" = "$NPM_VERSION" ]; then
+  echo "Auto-bumping patch version..."
+  npm version patch --no-git-tag-version
+  git add package.json package-lock.json
+  git commit --amend --no-edit
+  CURRENT_VERSION=$(node -p "require('./package.json').version")
 fi
+
+echo "Publishing @yhonda/gcloud-secrets@$CURRENT_VERSION to npm..."
+npm publish && git tag "v$CURRENT_VERSION" && git push origin "v$CURRENT_VERSION"
