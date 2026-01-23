@@ -408,6 +408,59 @@ async function runCli(args) {
         break;
       }
 
+      case "search": {
+        const keyword = parsed.positional[1];
+        if (!keyword) {
+          console.log("使い方: gcloud-secrets search <keyword> [--env <env>]");
+          process.exit(1);
+        }
+
+        const filterEnv = parsed.env;
+        const parent = `projects/${config.centralProject}`;
+        const [secrets] = await client.listSecrets({ parent });
+
+        console.log(`Searching for: "${keyword}"`);
+        if (filterEnv) console.log(`  環境: ${filterEnv}`);
+        console.log(`\nScanning ${secrets.length} secrets...\n`);
+
+        const matches = [];
+        const folders = new Set();
+
+        for (const secret of secrets) {
+          const [secretData] = await client.getSecret({ name: secret.name });
+          const folder = secretData.labels?.folder;
+          const env = secretData.labels?.environment || "(default)";
+
+          // 環境フィルタ
+          if (filterEnv && secretData.labels?.environment !== filterEnv) continue;
+
+          // 値を取得してキーワード検索
+          try {
+            const [version] = await client.accessSecretVersion({
+              name: `${secret.name}/versions/latest`,
+            });
+            const value = version.payload.data.toString("utf-8");
+            if (value.includes(keyword)) {
+              const { key } = getKeyFromSecret(secret.name.split("/").pop(), folder);
+              matches.push({ folder, env, key });
+              folders.add(folder);
+            }
+          } catch {
+            // バージョンがない場合はスキップ
+          }
+        }
+
+        if (matches.length === 0) {
+          console.log("No matches found");
+        } else {
+          for (const m of matches) {
+            console.log(`[FOUND] ${m.folder} / ${m.env} - ${m.key}`);
+          }
+          console.log(`\nFound ${matches.length} matches in ${folders.size} folders`);
+        }
+        break;
+      }
+
       default:
         console.log(`gcloud-secrets - GCP Secret Manager CLI
 
@@ -417,6 +470,7 @@ async function runCli(args) {
   gcloud-secrets pull [folder] [--env <env>]          シークレットを取得
   gcloud-secrets push [folder] [file] [--env <env>]   シークレットをアップロード
   gcloud-secrets scan [basePath] [--env <env>]        Git リポジトリの .env 同期状況をスキャン
+  gcloud-secrets search <keyword> [--env <env>]       値から逆引き検索
 
 オプション:
   --env, -e <env>  環境を指定 (dev, staging, prod など)

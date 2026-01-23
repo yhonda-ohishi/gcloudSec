@@ -54,7 +54,30 @@ gcloud-secrets scan <path> --env prod
 ```
 Git リポジトリ内の .env / .dev.vars ファイルと Secret Manager の同期状況を確認します。
 
+### 値から逆引き検索 (search)
+```bash
+# 特定の値がどのフォルダ・環境で使われているか検索
+gcloud-secrets search "api-key-12345"
+
+# 特定環境のみ検索
+gcloud-secrets search "client-id" --env prod
+```
+シークレットの値から、使用しているフォルダ・環境・キーを逆引き検索します。
+
 出力例:
+```
+Searching for: "api-key-12345"
+
+Scanning 45 secrets...
+
+[FOUND] my-app / dev - EXTERNAL_API_KEY
+[FOUND] my-app / prod - EXTERNAL_API_KEY
+[FOUND] other-service / dev - LINE_CLIENT_ID
+
+Found 3 matches in 2 folders
+```
+
+#### scan 出力例:
 ```
 === Secret Manager 同期状況 ===
 
@@ -96,4 +119,7 @@ gcloud-secrets scan ~/
 
 # 5. dev 環境のみスキャン
 gcloud-secrets scan ~/ --env dev
+
+# 6. 特定の値がどこで使われているか検索
+gcloud-secrets search "line-client-id-xxx"
 ```
