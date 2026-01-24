@@ -423,32 +423,34 @@ async function runCli(args) {
         if (filterEnv) console.log(`  環境: ${filterEnv}`);
         console.log(`\nScanning ${secrets.length} secrets...\n`);
 
-        const matches = [];
-        const folders = new Set();
+        const results = await Promise.all(
+          secrets.map(async (secret) => {
+            try {
+              const [secretData] = await client.getSecret({ name: secret.name });
+              const folder = secretData.labels?.folder;
+              const env = secretData.labels?.environment || "(default)";
 
-        for (const secret of secrets) {
-          const [secretData] = await client.getSecret({ name: secret.name });
-          const folder = secretData.labels?.folder;
-          const env = secretData.labels?.environment || "(default)";
+              // 環境フィルタ
+              if (filterEnv && secretData.labels?.environment !== filterEnv) return null;
 
-          // 環境フィルタ
-          if (filterEnv && secretData.labels?.environment !== filterEnv) continue;
-
-          // 値を取得してキーワード検索
-          try {
-            const [version] = await client.accessSecretVersion({
-              name: `${secret.name}/versions/latest`,
-            });
-            const value = version.payload.data.toString("utf-8");
-            if (value.includes(keyword)) {
-              const { key } = getKeyFromSecret(secret.name.split("/").pop(), folder);
-              matches.push({ folder, env, key });
-              folders.add(folder);
+              // 値を取得してキーワード検索
+              const [version] = await client.accessSecretVersion({
+                name: `${secret.name}/versions/latest`,
+              });
+              const value = version.payload.data.toString("utf-8");
+              if (value.includes(keyword)) {
+                const { key } = getKeyFromSecret(secret.name.split("/").pop(), folder);
+                return { folder, env, key };
+              }
+            } catch {
+              // バージョンがない場合はスキップ
             }
-          } catch {
-            // バージョンがない場合はスキップ
-          }
-        }
+            return null;
+          })
+        );
+
+        const matches = results.filter((r) => r !== null);
+        const folders = new Set(matches.map((m) => m.folder));
 
         if (matches.length === 0) {
           console.log("No matches found");
