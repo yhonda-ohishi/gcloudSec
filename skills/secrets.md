@@ -92,6 +92,25 @@ Found 3 matches in 2 folders
   未登録: 1
 ```
 
+### .env 自動同期 (pre-commit)
+```bash
+# カレントディレクトリの .env を Secret Manager に自動同期
+gcloud-secrets pre-commit
+```
+git hook 用の高速コマンド。キャッシュで .env の変更を検知し、変更がなければ API コール 0 で即座に終了。
+変更があれば `listSecrets` のフィルタ + 並列取得で高速にチェックし、新規/差分のある secret を自動 push。
+
+### グローバル git hook (hook)
+```bash
+# グローバル pre-commit hook をインストール
+gcloud-secrets hook install
+
+# アンインストール
+gcloud-secrets hook uninstall
+```
+`hook install` で全リポジトリの `git commit` 時に `pre-commit` が自動実行されます。
+既存の `.husky/` や `.git/hooks/` のフックにもフォワードするので互換性があります。
+
 ## 環境 (Environment) オプション
 
 `--env` または `-e` で環境を指定できます:
@@ -122,4 +141,10 @@ gcloud-secrets scan ~/ --env dev
 
 # 6. 特定の値がどこで使われているか検索
 gcloud-secrets search "line-client-id-xxx"
+
+# 7. グローバル git hook をインストール (全リポジトリで自動同期)
+gcloud-secrets hook install
+
+# 8. 手動で pre-commit を実行
+gcloud-secrets pre-commit
 ```

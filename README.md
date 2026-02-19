@@ -1,4 +1,4 @@
-# @yhonda/gcloud-secrets-mcp
+# @yhonda/gcloud-secrets
 
 複数の GCP プロジェクトの `.env` / `.dev.vars` を1つの Secret Manager で一元管理する CLI ツール。
 
@@ -8,11 +8,14 @@ Claude Code のスキルとしても利用可能。
 
 ```
 Secret Manager (中央プロジェクト)
-├── project-a/
+├── project-a/ [dev]
 │   ├── DATABASE_URL
 │   ├── API_KEY
 │   └── CLOUDFLARE_SECRET
-├── project-b/
+├── project-a/ [prod]
+│   ├── DATABASE_URL
+│   └── API_KEY
+├── project-b/ [dev]
 │   ├── DATABASE_URL
 │   └── STRIPE_KEY
 └── project-c/
@@ -22,13 +25,7 @@ Secret Manager (中央プロジェクト)
 ## インストール
 
 ```bash
-# ~/bin にインストール
-mkdir -p ~/bin && cd ~/bin
-npm install @yhonda/gcloud-secrets-mcp
-ln -sf ~/bin/node_modules/.bin/gcloud-secrets-mcp ~/bin/gcloud-secrets-mcp
-
-# PATH に追加 (~/.bashrc または ~/.zshrc)
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+npm install -g @yhonda/gcloud-secrets
 ```
 
 ### 前提条件
@@ -39,58 +36,100 @@ echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
 ## 初期設定
 
 ```bash
-gcloud-secrets-mcp init <project-id>
+gcloud-secrets init <project-id> [--env <default-env>]
 ```
 
 設定は `~/.secrets-manager.conf` に保存されます。
 
-## CLI 使い方
+## CLI コマンド
+
+### 基本操作
 
 ```bash
-# フォルダ一覧
-gcloud-secrets-mcp list
+# フォルダ一覧（環境ごとにグループ化）
+gcloud-secrets list
 
 # フォルダ内のシークレット一覧
-gcloud-secrets-mcp list my-project
+gcloud-secrets list my-project --env dev
 
-# シークレットを取得（.env形式で標準出力）
-gcloud-secrets-mcp pull my-project
+# シークレットを取得（.env 形式で標準出力）
+gcloud-secrets pull my-project --env prod
 
 # シークレットをアップロード
-gcloud-secrets-mcp push my-project .env
+gcloud-secrets push my-project .env --env dev
 ```
 
-## Claude Code スキル
+### スキャン & 検索
 
-`~/.claude/commands/secrets.md` を作成すると `/secrets` コマンドが使えます:
+```bash
+# 全リポジトリの .env 同期状況をスキャン
+gcloud-secrets scan
 
-```markdown
-# GCP Secret Manager スキル
+# 指定パス以下をスキャン（特定環境のみ）
+gcloud-secrets scan ~/projects --env dev
 
-ユーザーの指示に従って以下のコマンドを実行:
-
-- `~/bin/gcloud-secrets-mcp list` - フォルダ一覧
-- `~/bin/gcloud-secrets-mcp list <folder>` - シークレット一覧
-- `~/bin/gcloud-secrets-mcp pull <folder>` - 取得
-- `~/bin/gcloud-secrets-mcp push <folder> <file>` - アップロード
+# 値から逆引き検索
+gcloud-secrets search "api-key-12345"
 ```
 
-### 使用例
+### 自動同期 (pre-commit hook)
 
-Claude に以下のように依頼できます:
+```bash
+# グローバル git hook をインストール（全リポジトリ対象）
+gcloud-secrets hook install
 
-- `/secrets list`
-- `/secrets pull my-project`
-- 「このプロジェクトの .env を Secret Manager にアップロードして」
+# アンインストール
+gcloud-secrets hook uninstall
+
+# 手動実行
+gcloud-secrets pre-commit
+```
+
+`hook install` すると、全リポジトリで `git commit` のたびに `.env` が自動で Secret Manager に同期されます。
+
+**高速化の仕組み:**
+- キャッシュ (`~/.secrets-manager-cache.json`) で .env の変更を検知
+- 変更なし → **0 API コール**（即座に終了）
+- 変更あり → フィルタ付き API + 並列取得で高速チェック＆自動 push
+- 常に exit 0（commit をブロックしない）
+- 既存の `.husky/` や `.git/hooks/` と互換性あり
+
+## 環境 (Environment)
+
+`--env` または `-e` で環境を指定できます:
+
+```bash
+gcloud-secrets push --env dev     # dev 環境にアップロード
+gcloud-secrets pull -e prod       # prod 環境から取得
+gcloud-secrets scan --env staging # staging のみスキャン
+```
+
+デフォルト環境は `~/.secrets-manager.conf` の `DEFAULT_ENVIRONMENT` で設定。
 
 ## コマンド一覧
 
 | コマンド | 説明 |
 |---------|------|
-| `init <project-id>` | 中央プロジェクトを設定 |
-| `list [folder]` | 一覧表示 |
-| `pull [folder]` | シークレットを取得 |
-| `push [folder] [file]` | アップロード |
+| `init <project-id> [--env <default>]` | 中央プロジェクトを設定 |
+| `list [folder] [--env <env>]` | 一覧表示 |
+| `pull [folder] [--env <env>]` | シークレットを取得 |
+| `push [folder] [file] [--env <env>]` | アップロード |
+| `scan [basePath] [--env <env>]` | Git リポジトリの同期状況をスキャン |
+| `search <keyword> [--env <env>]` | 値から逆引き検索 |
+| `pre-commit` | .env 自動同期（git hook 用） |
+| `hook install` | グローバル git hook をインストール |
+| `hook uninstall` | グローバル git hook をアンインストール |
+
+## フォルダ名の正規化
+
+ディレクトリ名は自動で kebab-case に変換されます:
+
+- `gcloudSec` → `gcloud-sec`
+- `myAppTest` → `my-app-test`
+
+## シークレット名の形式
+
+`{folder}_{env}_{KEY}` (例: `gcloud-sec_dev_DATABASE_URL`)
 
 ## 設定
 
@@ -102,7 +141,16 @@ export SECRETS_CENTRAL_PROJECT=your-project-id
 
 # または設定ファイル (~/.secrets-manager.conf)
 SECRETS_CENTRAL_PROJECT=your-project-id
+DEFAULT_ENVIRONMENT=dev
 ```
+
+## Claude Code スキル
+
+インストール時に `~/.claude/skills/secrets.md` が自動作成され、`/secrets` コマンドが使えます:
+
+- 「このプロジェクトの .env を Secret Manager にアップロードして」
+- 「dev 環境のシークレットを確認して」
+- 「全リポジトリの同期状況をスキャンして」
 
 ## ライセンス
 

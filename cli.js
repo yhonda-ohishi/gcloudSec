@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
-import { readFileSync, writeFileSync, existsSync, readdirSync, lstatSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, lstatSync, mkdirSync, chmodSync, rmSync } from "fs";
+import { createHash } from "crypto";
 import { basename, join, dirname, resolve } from "path";
 import { homedir } from "os";
 import { execSync } from "child_process";
@@ -146,6 +147,27 @@ function compareValues(a, b) {
   return a.trim().replace(/\r\n/g, '\n') === b.trim().replace(/\r\n/g, '\n');
 }
 
+// キャッシュ管理
+function getCachePath() {
+  return join(homedir(), '.secrets-manager-cache.json');
+}
+
+function readCache() {
+  const cachePath = getCachePath();
+  if (existsSync(cachePath)) {
+    try { return JSON.parse(readFileSync(cachePath, 'utf-8')); } catch { return {}; }
+  }
+  return {};
+}
+
+function writeCache(cache) {
+  writeFileSync(getCachePath(), JSON.stringify(cache, null, 2));
+}
+
+function hashContent(content) {
+  return createHash('md5').update(content).digest('hex');
+}
+
 // CLI モード
 async function runCli(args) {
   const parsed = parseArgs(args);
@@ -153,7 +175,7 @@ async function runCli(args) {
   const config = getConfig();
   const targetEnv = parsed.env || config.defaultEnvironment;
 
-  if (!config.centralProject && command !== "init") {
+  if (!config.centralProject && command !== "init" && command !== "pre-commit" && command !== "hook") {
     console.error("エラー: 先に init を実行してください");
     process.exit(1);
   }
@@ -408,6 +430,128 @@ async function runCli(args) {
         break;
       }
 
+      case "pre-commit": {
+        // config なし → サイレント exit
+        if (!config.centralProject) process.exit(0);
+
+        const cwd = process.cwd();
+        const folder = normalizeFolder(basename(resolve(cwd)));
+        const envFiles = findEnvFiles(cwd);
+        if (envFiles.length === 0) process.exit(0);
+
+        const cache = readCache();
+        const parent = `projects/${config.centralProject}`;
+        let totalPushed = 0;
+
+        for (const envFile of envFiles) {
+          let content;
+          try { content = readFileSync(envFile.path, 'utf-8'); } catch { continue; }
+          if (!content.trim()) continue;
+
+          const currentHash = hashContent(content);
+          const cacheKey = envFile.path;
+
+          // キャッシュヒット → スキップ (0 API コール)
+          if (cache[cacheKey] && cache[cacheKey].hash === currentHash) {
+            console.log(`✓ ${envFile.filename} synced`);
+            continue;
+          }
+
+          const localEntries = parseEnvFile(content);
+          if (localEntries.length === 0) continue;
+
+          const labels = { folder, environment: targetEnv };
+
+          try {
+            // フィルタ付き listSecrets (1 API コール、ラベル込み)
+            const filter = `labels.folder=${folder} AND labels.environment=${targetEnv}`;
+            const [remoteSecrets] = await client.listSecrets({ parent, filter });
+
+            // リモートキー → シークレット名マップ
+            const remoteMap = new Map();
+            for (const secret of remoteSecrets) {
+              const { key } = getKeyFromSecret(secret.name.split('/').pop(), folder);
+              remoteMap.set(key, secret.name);
+            }
+
+            // リモート値を並列取得
+            const remoteValues = new Map();
+            const keysToCompare = localEntries.filter(e => remoteMap.has(e.key));
+            if (keysToCompare.length > 0) {
+              const results = await Promise.all(
+                keysToCompare.map(async (entry) => {
+                  try {
+                    const [version] = await client.accessSecretVersion({
+                      name: `${remoteMap.get(entry.key)}/versions/latest`,
+                    });
+                    return { key: entry.key, value: version.payload.data.toString('utf-8') };
+                  } catch { return { key: entry.key, value: null }; }
+                })
+              );
+              for (const r of results) {
+                if (r.value !== null) remoteValues.set(r.key, r.value);
+              }
+            }
+
+            // 新規/変更キーを特定
+            const toPush = [];
+            for (const entry of localEntries) {
+              if (!remoteMap.has(entry.key)) {
+                toPush.push(entry);
+              } else if (!remoteValues.has(entry.key) || !compareValues(entry.value, remoteValues.get(entry.key))) {
+                toPush.push(entry);
+              }
+            }
+
+            // push
+            if (toPush.length > 0) {
+              for (const entry of toPush) {
+                const secretId = makeSecretName(folder, entry.key, targetEnv);
+                const secretName = `${parent}/secrets/${secretId}`;
+                try {
+                  await client.getSecret({ name: secretName });
+                  await client.updateSecret({
+                    secret: { name: secretName, labels },
+                    updateMask: { paths: ['labels'] }
+                  });
+                  await client.addSecretVersion({
+                    parent: secretName,
+                    payload: { data: Buffer.from(entry.value) },
+                  });
+                } catch {
+                  await client.createSecret({
+                    parent,
+                    secretId,
+                    secret: { replication: { automatic: {} }, labels },
+                  });
+                  await client.addSecretVersion({
+                    parent: secretName,
+                    payload: { data: Buffer.from(entry.value) },
+                  });
+                }
+              }
+              console.log(`↑ ${envFile.filename}: ${toPush.length} secrets pushed (${folder}/${targetEnv})`);
+              totalPushed += toPush.length;
+            } else {
+              console.log(`✓ ${envFile.filename} synced`);
+            }
+
+            // キャッシュ更新
+            cache[cacheKey] = {
+              hash: currentHash,
+              folder,
+              env: targetEnv,
+              syncedAt: new Date().toISOString()
+            };
+          } catch (error) {
+            console.log(`⚠ ${envFile.filename}: sync skipped (${error.message})`);
+          }
+        }
+
+        try { writeCache(cache); } catch { }
+        process.exit(0);
+      }
+
       case "search": {
         const keyword = parsed.positional[1];
         if (!keyword) {
@@ -463,6 +607,88 @@ async function runCli(args) {
         break;
       }
 
+      case "hook": {
+        const subcommand = parsed.positional[1];
+
+        if (subcommand === "install") {
+          const hooksDir = join(homedir(), '.git-hooks');
+          if (!existsSync(hooksDir)) mkdirSync(hooksDir, { recursive: true });
+
+          const hookTypes = [
+            'applypatch-msg', 'pre-applypatch', 'post-applypatch',
+            'pre-commit', 'prepare-commit-msg', 'commit-msg', 'post-commit',
+            'pre-rebase', 'post-checkout', 'post-merge',
+            'pre-push', 'pre-auto-gc', 'post-rewrite'
+          ];
+
+          for (const hookType of hookTypes) {
+            const hookPath = join(hooksDir, hookType);
+            let extraLogic = '';
+
+            if (hookType === 'pre-commit') {
+              extraLogic = `
+# gcloud-secrets: auto-sync .env to Secret Manager
+if command -v gcloud-secrets >/dev/null 2>&1; then
+  gcloud-secrets pre-commit
+fi
+`;
+            }
+
+            const hookScript = `#!/bin/sh
+# Global git hook: ${hookType}
+# Installed by gcloud-secrets
+${extraLogic}
+# Forward to .husky/${hookType} if it exists
+if [ -f "$(pwd)/.husky/${hookType}" ]; then
+  "$(pwd)/.husky/${hookType}" "$@"
+  exit_code=$?
+  if [ $exit_code -ne 0 ]; then
+    exit $exit_code
+  fi
+fi
+
+# Forward to .git/hooks/${hookType} if it exists
+GIT_DIR_HOOKS="$(git rev-parse --git-dir 2>/dev/null)/hooks/${hookType}"
+if [ -f "$GIT_DIR_HOOKS" ] && [ -x "$GIT_DIR_HOOKS" ]; then
+  "$GIT_DIR_HOOKS" "$@"
+  exit $?
+fi
+
+exit 0
+`;
+            writeFileSync(hookPath, hookScript);
+            chmodSync(hookPath, '755');
+          }
+
+          execSync('git config --global core.hooksPath ~/.git-hooks');
+          console.log(`グローバル git hooks をインストールしました:
+  フックディレクトリ: ${hooksDir}
+  対象: pre-commit (gcloud-secrets auto-sync)
+  互換性: .husky/ と .git/hooks/ にフォワード
+
+全リポジトリの git commit で .env が自動同期されます。`);
+
+        } else if (subcommand === "uninstall") {
+          try { execSync('git config --global --unset core.hooksPath', { stdio: 'ignore' }); } catch { }
+          const hooksDir = join(homedir(), '.git-hooks');
+          if (existsSync(hooksDir)) {
+            try {
+              rmSync(hooksDir, { recursive: true, force: true });
+            } catch (error) {
+              console.log(`⚠ ${hooksDir} の削除に失敗: ${error.message}`);
+              console.log(`手動で削除してください: rm -rf ${hooksDir}`);
+            }
+          }
+          console.log(`グローバル git hooks をアンインストールしました。`);
+
+        } else {
+          console.log(`使い方:
+  gcloud-secrets hook install      グローバル pre-commit hook をインストール
+  gcloud-secrets hook uninstall    グローバル pre-commit hook をアンインストール`);
+        }
+        break;
+      }
+
       default:
         console.log(`gcloud-secrets - GCP Secret Manager CLI
 
@@ -473,6 +699,9 @@ async function runCli(args) {
   gcloud-secrets push [folder] [file] [--env <env>]   シークレットをアップロード
   gcloud-secrets scan [basePath] [--env <env>]        Git リポジトリの .env 同期状況をスキャン
   gcloud-secrets search <keyword> [--env <env>]       値から逆引き検索
+  gcloud-secrets pre-commit                           .env 自動同期 (git hook 用)
+  gcloud-secrets hook install                         グローバル git hook インストール
+  gcloud-secrets hook uninstall                       グローバル git hook アンインストール
 
 オプション:
   --env, -e <env>  環境を指定 (dev, staging, prod など)

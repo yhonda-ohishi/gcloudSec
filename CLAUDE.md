@@ -12,6 +12,9 @@ gcloud-secrets pull [folder] [--env <env>]          # シークレットを .env
 gcloud-secrets push [folder] [file] [--env <env>]   # .env をアップロード
 gcloud-secrets scan [basePath] [--env <env>]        # Git リポジトリの同期状況をスキャン
 gcloud-secrets search <keyword> [--env <env>]  # 値から逆引き検索
+gcloud-secrets pre-commit                      # .env 自動同期 (git hook 用)
+gcloud-secrets hook install                    # グローバル git hook インストール
+gcloud-secrets hook uninstall                  # グローバル git hook アンインストール
 ```
 
 ## Key Concepts
@@ -34,6 +37,13 @@ gcloud-secrets search <keyword> [--env <env>]  # 値から逆引き検索
 - `[OK]` - 登録済み、ローカルとリモートが一致
 - `[DIFF]` - 差分あり
 - `[NEW]` - 未登録
+
+### Pre-commit Auto Sync
+`gcloud-secrets pre-commit` は commit 時に .env を自動同期する:
+- キャッシュ (`~/.secrets-manager-cache.json`) で .env 変更を検知
+- 変更なし → 0 API コール（即座に終了）
+- 変更あり → `listSecrets` のフィルタ + 並列取得で高速チェック＆自動 push
+- `gcloud-secrets hook install` でグローバル git hook として設定
 
 ## Development
 
