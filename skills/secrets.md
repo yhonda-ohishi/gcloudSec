@@ -1,14 +1,19 @@
 # Skill: secrets
 
-GCP Secret Manager を使って .env ファイルを管理するスキル
+Google Drive + age 暗号化でシークレットを管理するスキル
 
 ## コマンド一覧
 
 ### 初期化
 ```bash
-gcloud-secrets init <project-id> [--env <default>]
+gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
 ```
-GCP プロジェクト ID を設定します。`--env` でデフォルト環境を指定できます（省略時は `dev`）。
+Google Drive + OAuth + age 鍵の初期設定を行います。
+- `drive-folder-id` 省略時は Drive に "gcloud-secrets" フォルダを自動作成
+- `--client-id` / `--client-secret`: Google Cloud Console で作成した OAuth クライアント情報
+- `--env` でデフォルト環境を指定（省略時は `dev`）
+- `--age-key <path>` で age 秘密鍵パスを指定（省略時は `~/.age/key.txt`、未作成なら自動生成）
+- `--age-pub <key>` で age 公開鍵を指定（省略時は秘密鍵ファイルから自動取得）
 
 ### 一覧表示
 ```bash
@@ -27,7 +32,7 @@ gcloud-secrets pull --env dev
 # 指定フォルダから取得
 gcloud-secrets pull <folder> --env prod
 ```
-Secret Manager から .env 形式でシークレットを取得します。
+Drive から暗号化ファイルをダウンロードし、age で復号して .env 形式で出力します。
 
 ### シークレット登録 (push)
 ```bash
@@ -40,6 +45,7 @@ gcloud-secrets push <folder> --env prod
 # 指定ファイルをアップロード
 gcloud-secrets push <folder> <file> --env staging
 ```
+.env ファイルを age で暗号化し、Drive にアップロードします。
 
 ### 同期状況スキャン (scan)
 ```bash
@@ -52,7 +58,7 @@ gcloud-secrets scan --env dev
 # 指定ディレクトリ以下をスキャン
 gcloud-secrets scan <path> --env prod
 ```
-Git リポジトリ内の .env / .dev.vars ファイルと Secret Manager の同期状況を確認します。
+Git リポジトリ内の .env / .dev.vars ファイルと Drive 上の暗号化ファイルの同期状況を確認します。
 
 ### 値から逆引き検索 (search)
 ```bash
@@ -62,13 +68,12 @@ gcloud-secrets search "api-key-12345"
 # 特定環境のみ検索
 gcloud-secrets search "client-id" --env prod
 ```
-シークレットの値から、使用しているフォルダ・環境・キーを逆引き検索します。
 
 出力例:
 ```
 Searching for: "api-key-12345"
 
-Scanning 45 secrets...
+Scanning 8 files...
 
 [FOUND] my-app / dev - EXTERNAL_API_KEY
 [FOUND] my-app / prod - EXTERNAL_API_KEY
@@ -79,7 +84,7 @@ Found 3 matches in 2 folders
 
 #### scan 出力例:
 ```
-=== Secret Manager 同期状況 ===
+=== シークレット同期状況 ===
 
 [OK]   project-a/ .env [dev] (3 keys)
 [DIFF] project-b/ .env [prod] (2 keys) - 差分あり
@@ -94,11 +99,11 @@ Found 3 matches in 2 folders
 
 ### .env 自動同期 (pre-commit)
 ```bash
-# カレントディレクトリの .env を Secret Manager に自動同期
+# カレントディレクトリの .env を Drive に自動同期
 gcloud-secrets pre-commit
 ```
 git hook 用の高速コマンド。キャッシュで .env の変更を検知し、変更がなければ API コール 0 で即座に終了。
-変更があれば `listSecrets` のフィルタ + 並列取得で高速にチェックし、新規/差分のある secret を自動 push。
+変更があれば Drive からダウンロード＋復号で比較し、差分があれば暗号化＋アップロード。
 
 ### グローバル git hook (hook)
 ```bash
@@ -124,8 +129,8 @@ gcloud-secrets hook uninstall
 ## 使用例
 
 ```bash
-# 1. 初期化 (デフォルト環境を dev に設定)
-gcloud-secrets init my-gcp-project --env dev
+# 1. 初期化 (OAuth クライアント情報を設定)
+gcloud-secrets init --client-id "xxx.apps.googleusercontent.com" --client-secret "GOCSPX-xxx" --env dev
 
 # 2. dev 環境に .env を登録
 gcloud-secrets push --env dev

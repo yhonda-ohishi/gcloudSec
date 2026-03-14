@@ -1,23 +1,42 @@
-# gcloudSec - GCP Secret Manager CLI
+# gcloudSec - シークレット管理 CLI (Google Drive + age 暗号化)
 
 ## Overview
-GCP Secret Manager を GitHub clone 風に管理する CLI ツール。
-`.env` ファイルと Secret Manager を同期管理する。
+Google Drive に age 暗号化した .env ファイルを保存・管理する CLI ツール。
+フォルダ/環境ごとに暗号化ファイルを分割し、GitHub clone 風の操作で同期管理する。
 
 ## Commands
 ```bash
-gcloud-secrets init <project-id> [--env <default>]  # 中央プロジェクトを設定
+gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
 gcloud-secrets list [folder] [--env <env>]          # フォルダ/シークレット一覧
 gcloud-secrets pull [folder] [--env <env>]          # シークレットを .env 形式で取得
 gcloud-secrets push [folder] [file] [--env <env>]   # .env をアップロード
 gcloud-secrets scan [basePath] [--env <env>]        # Git リポジトリの同期状況をスキャン
-gcloud-secrets search <keyword> [--env <env>]  # 値から逆引き検索
-gcloud-secrets pre-commit                      # .env 自動同期 (git hook 用)
-gcloud-secrets hook install                    # グローバル git hook インストール
-gcloud-secrets hook uninstall                  # グローバル git hook アンインストール
+gcloud-secrets search <keyword> [--env <env>]       # 値から逆引き検索
+gcloud-secrets pre-commit                           # .env 自動同期 (git hook 用)
+gcloud-secrets hook install                         # グローバル git hook インストール
+gcloud-secrets hook uninstall                       # グローバル git hook アンインストール
 ```
 
 ## Key Concepts
+
+### Architecture
+シークレットは Google Drive 上に age 暗号化ファイルとして保存:
+```
+Drive Root Folder (DRIVE_FOLDER_ID)
+├── my-app/
+│   ├── dev.env.age
+│   └── prod.env.age
+├── other-service/
+│   └── dev.env.age
+```
+
+### Configuration
+`~/.secrets-manager.conf`:
+- `DRIVE_FOLDER_ID` - Drive ルートフォルダ ID
+- `DEFAULT_ENVIRONMENT` - デフォルト環境
+- `AGE_PUBLIC_KEY` - age 公開鍵 (`age1...`)
+- `AGE_KEY_PATH` - age 秘密鍵パス (デフォルト: `~/.age/key.txt`)
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` - OAuth クライアント情報
 
 ### Environment (環境)
 `--env` または `-e` で環境を指定できる:
@@ -30,9 +49,6 @@ gcloud-secrets hook uninstall                  # グローバル git hook アン
 - `gcloudSec` → `gcloud-sec`
 - `myAppTest` → `my-app-test`
 
-### Secret Naming
-シークレット名: `{folder}_{env}_{KEY}` (例: `gcloud-sec_dev_DATABASE_URL`)
-
 ### Scan Status
 - `[OK]` - 登録済み、ローカルとリモートが一致
 - `[DIFF]` - 差分あり
@@ -42,8 +58,13 @@ gcloud-secrets hook uninstall                  # グローバル git hook アン
 `gcloud-secrets pre-commit` は commit 時に .env を自動同期する:
 - キャッシュ (`~/.secrets-manager-cache.json`) で .env 変更を検知
 - 変更なし → 0 API コール（即座に終了）
-- 変更あり → `listSecrets` のフィルタ + 並列取得で高速チェック＆自動 push
+- 変更あり → Drive からダウンロード＋復号で比較、差分があれば暗号化＋アップロード
 - `gcloud-secrets hook install` でグローバル git hook として設定
+
+### Prerequisites
+- `age` CLI がインストール済み
+- Google Cloud Console で OAuth 2.0 クライアント（デスクトップアプリ）を作成済み
+- `gcloud-secrets init` で初期設定済み
 
 ## Development
 
