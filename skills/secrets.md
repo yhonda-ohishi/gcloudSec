@@ -15,6 +15,16 @@ Google Drive + OAuth + age 鍵の初期設定を行います。
 - `--age-key <path>` で age 秘密鍵パスを指定（省略時は `~/.age/key.txt`、未作成なら自動生成）
 - `--age-pub <key>` で age 公開鍵を指定（省略時は秘密鍵ファイルから自動取得）
 
+### 再認証 (reauth)
+```bash
+gcloud-secrets reauth
+```
+OAuth token が失効した (refresh token invalid_grant) 時に、**token だけ** を更新します。
+- 既存 config (DRIVE_FOLDER_ID / OAuth client / age 鍵) には一切触れない
+- 失効 token は `~/.secrets-manager-oauth.json.stale-<timestamp>` に退避
+- OAuth フロー後に Drive フォルダの read 疎通も確認
+- pre-commit hook が `invalid_grant` を検知すると `reauth` の実行を促すメッセージを表示 (commit は blocking しない)
+
 ### 一覧表示
 ```bash
 # フォルダ一覧 (環境ごとにグループ化)

@@ -112,33 +112,13 @@ function getTokenPath() {
   return join(homedir(), '.secrets-manager-oauth.json');
 }
 
-async function getAuthClient(config) {
-  if (!config.googleClientId || !config.googleClientSecret) {
-    console.error('エラー: Google OAuth クライアント ID/Secret が設定されていません');
-    console.error('init コマンドで --client-id と --client-secret を指定してください');
-    process.exit(1);
-  }
+function isInvalidGrantError(err) {
+  const msg = String(err?.message || '');
+  const data = err?.response?.data || {};
+  return msg.includes('invalid_grant') || data.error === 'invalid_grant';
+}
 
-  const oauth2Client = new google.auth.OAuth2(
-    config.googleClientId,
-    config.googleClientSecret,
-    OAUTH_REDIRECT_URI
-  );
-
-  const tokenPath = getTokenPath();
-  if (existsSync(tokenPath)) {
-    const tokens = JSON.parse(readFileSync(tokenPath, 'utf-8'));
-    oauth2Client.setCredentials(tokens);
-    oauth2Client.on('tokens', (newTokens) => {
-      try {
-        const saved = JSON.parse(readFileSync(tokenPath, 'utf-8'));
-        writeFileSync(tokenPath, JSON.stringify({ ...saved, ...newTokens }, null, 2));
-      } catch { }
-    });
-    return oauth2Client;
-  }
-
-  // 初回認証フロー
+async function performOAuthFlow(oauth2Client) {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: OAUTH_SCOPES,
@@ -146,11 +126,17 @@ async function getAuthClient(config) {
   });
 
   console.log('ブラウザで認証を行います...');
+  let browserOpened = false;
   try {
     const openCmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
     execSync(`${openCmd} "${authUrl}"`, { stdio: 'ignore' });
-  } catch {
-    console.log(`以下のURLをブラウザで開いてください:\n${authUrl}`);
+    browserOpened = true;
+  } catch { }
+  if (!browserOpened) {
+    console.log(`ブラウザが開けませんでした。以下のURLを手動で開いてください:\n${authUrl}`);
+  } else {
+    // リモートセッションなど stdio 共有環境用に URL も常時表示
+    console.log(`(ブラウザが開かない場合は以下を開いてください)\n${authUrl}`);
   }
 
   const code = await new Promise((resolve, reject) => {
@@ -177,6 +163,7 @@ async function getAuthClient(config) {
 
   const { tokens } = await oauth2Client.getToken(code);
   oauth2Client.setCredentials(tokens);
+  const tokenPath = getTokenPath();
   writeFileSync(tokenPath, JSON.stringify(tokens, null, 2));
   console.log('認証完了');
 
@@ -188,6 +175,35 @@ async function getAuthClient(config) {
   });
 
   return oauth2Client;
+}
+
+async function getAuthClient(config) {
+  if (!config.googleClientId || !config.googleClientSecret) {
+    console.error('エラー: Google OAuth クライアント ID/Secret が設定されていません');
+    console.error('init コマンドで --client-id と --client-secret を指定してください');
+    process.exit(1);
+  }
+
+  const oauth2Client = new google.auth.OAuth2(
+    config.googleClientId,
+    config.googleClientSecret,
+    OAUTH_REDIRECT_URI
+  );
+
+  const tokenPath = getTokenPath();
+  if (existsSync(tokenPath)) {
+    const tokens = JSON.parse(readFileSync(tokenPath, 'utf-8'));
+    oauth2Client.setCredentials(tokens);
+    oauth2Client.on('tokens', (newTokens) => {
+      try {
+        const saved = JSON.parse(readFileSync(tokenPath, 'utf-8'));
+        writeFileSync(tokenPath, JSON.stringify({ ...saved, ...newTokens }, null, 2));
+      } catch { }
+    });
+    return oauth2Client;
+  }
+
+  return performOAuthFlow(oauth2Client);
 }
 
 async function getDriveClient(config) {
@@ -501,6 +517,54 @@ async function runCli(args) {
         break;
       }
 
+      case "reauth": {
+        // 既存設定が揃っていること (init 済み) が前提
+        if (!config.googleClientId || !config.googleClientSecret) {
+          console.error('エラー: OAuth クライアント情報が未設定です');
+          console.error('先に init を実行してください');
+          process.exit(1);
+        }
+        if (!config.driveFolderId) {
+          console.error('エラー: DRIVE_FOLDER_ID が未設定です');
+          console.error('先に init を実行してください');
+          process.exit(1);
+        }
+
+        // 失効 token を退避 (新トークン取得前に削除、既存値が残ると古い refresh_token が使われる)
+        const tokenPath = getTokenPath();
+        if (existsSync(tokenPath)) {
+          const backupPath = `${tokenPath}.stale-${Date.now()}`;
+          try {
+            writeFileSync(backupPath, readFileSync(tokenPath));
+            rmSync(tokenPath);
+            console.log(`旧 token を退避: ${backupPath}`);
+          } catch (e) {
+            console.error(`警告: 旧 token の退避に失敗: ${e.message}`);
+          }
+        }
+
+        // OAuth フローのみ実行
+        const oauth2Client = new google.auth.OAuth2(
+          config.googleClientId,
+          config.googleClientSecret,
+          OAUTH_REDIRECT_URI
+        );
+        await performOAuthFlow(oauth2Client);
+
+        // Drive 疎通確認 (既存フォルダへの read アクセスのみ、書き込みは一切しない)
+        const drive = google.drive({ version: 'v3', auth: oauth2Client });
+        try {
+          const res = await drive.files.get({ fileId: config.driveFolderId, fields: 'id, name' });
+          console.log(`Drive フォルダ確認: ${res.data.name} (${config.driveFolderId})`);
+        } catch (e) {
+          console.error(`警告: Drive フォルダ検証失敗 (${e.message})`);
+          console.error('token は更新済み。フォルダ ID / 権限を確認してください');
+          process.exit(1);
+        }
+        console.log('再認証完了');
+        break;
+      }
+
       case "list": {
         const folder = parsed.positional[1];
         const drive = await getDriveClient(config);
@@ -733,7 +797,15 @@ async function runCli(args) {
         let drive;
         try { drive = await getDriveClient(config); } catch { process.exit(0); }
 
+        let reauthWarned = false;
+        const warnReauth = () => {
+          if (reauthWarned) return;
+          reauthWarned = true;
+          console.error('⚠ OAuth expired. Run `gcloud-secrets reauth` to re-authenticate.');
+        };
+
         for (const envFile of envFiles) {
+          if (reauthWarned) break;
           let content;
           try { content = readFileSync(envFile.path, 'utf-8'); } catch { continue; }
           if (!content.trim()) continue;
@@ -797,6 +869,10 @@ async function runCli(args) {
               syncedAt: new Date().toISOString()
             };
           } catch (error) {
+            if (isInvalidGrantError(error)) {
+              warnReauth();
+              break;
+            }
             console.log(`⚠ ${envFile.filename}: sync skipped (${error.message})`);
           }
         }
@@ -1006,6 +1082,7 @@ exit 0
 使い方:
   gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
                                                    初期設定 (OAuth + age 鍵 + Drive フォルダ)
+  gcloud-secrets reauth                            OAuth token 再認証のみ (config は保持)
   gcloud-secrets list [folder] [--env <env>]       一覧表示
   gcloud-secrets pull [folder] [--env <env>]       シークレットを取得
   gcloud-secrets push [folder] [file] [--env <env>] シークレットをアップロード

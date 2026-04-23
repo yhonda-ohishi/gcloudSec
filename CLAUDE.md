@@ -7,6 +7,7 @@ Google Drive に age 暗号化した .env ファイルを保存・管理する C
 ## Commands
 ```bash
 gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
+gcloud-secrets reauth                                # OAuth token 失効時の再認証 (config は触らない)
 gcloud-secrets list [folder] [--env <env>]          # フォルダ/シークレット一覧
 gcloud-secrets pull [folder] [--env <env>]          # シークレットを .env 形式で取得
 gcloud-secrets push [folder] [file] [--env <env>]   # .env をアップロード
