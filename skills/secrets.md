@@ -15,6 +15,26 @@ Google Drive + OAuth + age 鍵の初期設定を行います。
 - `--age-key <path>` で age 秘密鍵パスを指定（省略時は `~/.age/key.txt`、未作成なら自動生成）
 - `--age-pub <key>` で age 公開鍵を指定（省略時は秘密鍵ファイルから自動取得）
 
+### 再認証 (reauth)
+```bash
+gcloud-secrets reauth
+```
+OAuth token が失効した (refresh token invalid_grant) 時に、**token だけ** を更新します。
+- 既存 config (DRIVE_FOLDER_ID / OAuth client / age 鍵) には一切触れない
+- 失効 token は `~/.secrets-manager-oauth.json.stale-<timestamp>` に退避
+- **OAuth 2.0 Device Flow** (Tailscale 風) で認証: URL + ユーザーコード表示 → 別デバイスで承認 → CLI は token エンドポイントを poll
+- リモート SSH / ヘッドレス環境でも動作 (ローカルブラウザ不要)
+- OAuth フロー後に Drive フォルダの read 疎通も確認
+- pre-commit hook が `invalid_grant` を検知すると `reauth` の実行を促すメッセージを表示 (commit は blocking しない)
+
+**前提**: `~/.secrets-manager.conf` に以下を追加しておくこと (Google Cloud Console で "TVs and Limited Input devices" タイプの OAuth client を作成):
+```
+GOOGLE_DEVICE_CLIENT_ID=xxxxx.apps.googleusercontent.com
+GOOGLE_DEVICE_CLIENT_SECRET=GOCSPX-xxxxx
+```
+
+Init の desktop flow で取った token と device flow で取った token は `_client_type` マーカーで区別され、自動で適切な client 情報で refresh されます。
+
 ### 一覧表示
 ```bash
 # フォルダ一覧 (環境ごとにグループ化)

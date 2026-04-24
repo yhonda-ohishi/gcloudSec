@@ -46,6 +46,8 @@ function getConfig() {
     ageKeyPath: process.env.AGE_KEY_PATH || join(homedir(), ".age", "key.txt"),
     googleClientId: process.env.GOOGLE_CLIENT_ID || "",
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+    googleDeviceClientId: process.env.GOOGLE_DEVICE_CLIENT_ID || "",
+    googleDeviceClientSecret: process.env.GOOGLE_DEVICE_CLIENT_SECRET || "",
   };
   if (existsSync(configFile)) {
     const content = readFileSync(configFile, "utf-8");
@@ -56,6 +58,8 @@ function getConfig() {
       ['AGE_KEY_PATH', 'ageKeyPath'],
       ['GOOGLE_CLIENT_ID', 'googleClientId'],
       ['GOOGLE_CLIENT_SECRET', 'googleClientSecret'],
+      ['GOOGLE_DEVICE_CLIENT_ID', 'googleDeviceClientId'],
+      ['GOOGLE_DEVICE_CLIENT_SECRET', 'googleDeviceClientSecret'],
     ]) {
       const match = content.match(new RegExp(`^${envKey}=(.+)$`, 'm'));
       if (match) config[configKey] = match[1].trim();
@@ -107,38 +111,86 @@ function getAgePublicKeyFromFile(keyPath) {
 const OAUTH_REDIRECT_PORT = 3456;
 const OAUTH_REDIRECT_URI = `http://localhost:${OAUTH_REDIRECT_PORT}/callback`;
 const OAUTH_SCOPES = ['https://www.googleapis.com/auth/drive'];
+const DEVICE_CODE_URL = 'https://oauth2.googleapis.com/device/code';
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 
 function getTokenPath() {
   return join(homedir(), '.secrets-manager-oauth.json');
 }
 
-async function getAuthClient(config) {
-  if (!config.googleClientId || !config.googleClientSecret) {
-    console.error('エラー: Google OAuth クライアント ID/Secret が設定されていません');
-    console.error('init コマンドで --client-id と --client-secret を指定してください');
-    process.exit(1);
+async function performDeviceFlow(config) {
+  if (!config.googleDeviceClientId || !config.googleDeviceClientSecret) {
+    throw new Error(
+      'Device flow 用 OAuth client が未設定です。\n' +
+      '~/.secrets-manager.conf に GOOGLE_DEVICE_CLIENT_ID / GOOGLE_DEVICE_CLIENT_SECRET を設定してください\n' +
+      '(Google Cloud Console → OAuth 2.0 クライアント ID → "TVs and Limited Input devices" タイプ)'
+    );
   }
 
-  const oauth2Client = new google.auth.OAuth2(
-    config.googleClientId,
-    config.googleClientSecret,
-    OAUTH_REDIRECT_URI
-  );
+  // Step 1: Device code 取得
+  const deviceRes = await fetch(DEVICE_CODE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: config.googleDeviceClientId,
+      scope: OAUTH_SCOPES.join(' '),
+    }),
+  });
+  if (!deviceRes.ok) {
+    const text = await deviceRes.text();
+    throw new Error(`Device code リクエスト失敗 (${deviceRes.status}): ${text}`);
+  }
+  const dc = await deviceRes.json();
+  // dc: { device_code, user_code, verification_url, expires_in, interval }
 
-  const tokenPath = getTokenPath();
-  if (existsSync(tokenPath)) {
-    const tokens = JSON.parse(readFileSync(tokenPath, 'utf-8'));
-    oauth2Client.setCredentials(tokens);
-    oauth2Client.on('tokens', (newTokens) => {
-      try {
-        const saved = JSON.parse(readFileSync(tokenPath, 'utf-8'));
-        writeFileSync(tokenPath, JSON.stringify({ ...saved, ...newTokens }, null, 2));
-      } catch { }
+  // Step 2: ユーザーへ案内
+  console.log('\n認証するには、以下の URL を別デバイスのブラウザで開き、コードを入力してください:');
+  console.log(`  URL:  ${dc.verification_url}`);
+  console.log(`  Code: ${dc.user_code}`);
+  console.log(`  (有効期限 ${Math.floor(dc.expires_in / 60)} 分、待機中...)\n`);
+
+  // Step 3: Poll
+  const pollInterval = Math.max(dc.interval || 5, 1);
+  const deadline = Date.now() + dc.expires_in * 1000;
+  let currentInterval = pollInterval;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, currentInterval * 1000));
+    const tokenRes = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: config.googleDeviceClientId,
+        client_secret: config.googleDeviceClientSecret,
+        device_code: dc.device_code,
+        grant_type: DEVICE_GRANT_TYPE,
+      }),
     });
-    return oauth2Client;
+    const data = await tokenRes.json();
+    if (data.error === 'authorization_pending') continue;
+    if (data.error === 'slow_down') { currentInterval += 5; continue; }
+    if (data.error === 'access_denied') throw new Error('ユーザーが認証を拒否しました');
+    if (data.error === 'expired_token') throw new Error('Device code が失効しました、再実行してください');
+    if (data.error) throw new Error(`Device flow エラー: ${data.error} ${data.error_description || ''}`);
+    if (data.access_token) {
+      const tokenPath = getTokenPath();
+      // _client_type マーカーで、後続の refresh 時にどの client で発行されたか判別する
+      const annotated = { ...data, _client_type: 'device' };
+      writeFileSync(tokenPath, JSON.stringify(annotated, null, 2));
+      console.log('認証完了');
+      return annotated;
+    }
   }
+  throw new Error('Device flow タイムアウト');
+}
 
-  // 初回認証フロー
+function isInvalidGrantError(err) {
+  const msg = String(err?.message || '');
+  const data = err?.response?.data || {};
+  return msg.includes('invalid_grant') || data.error === 'invalid_grant';
+}
+
+async function performOAuthFlow(oauth2Client) {
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: OAUTH_SCOPES,
@@ -146,11 +198,17 @@ async function getAuthClient(config) {
   });
 
   console.log('ブラウザで認証を行います...');
+  let browserOpened = false;
   try {
     const openCmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
     execSync(`${openCmd} "${authUrl}"`, { stdio: 'ignore' });
-  } catch {
-    console.log(`以下のURLをブラウザで開いてください:\n${authUrl}`);
+    browserOpened = true;
+  } catch { }
+  if (!browserOpened) {
+    console.log(`ブラウザが開けませんでした。以下のURLを手動で開いてください:\n${authUrl}`);
+  } else {
+    // リモートセッションなど stdio 共有環境用に URL も常時表示
+    console.log(`(ブラウザが開かない場合は以下を開いてください)\n${authUrl}`);
   }
 
   const code = await new Promise((resolve, reject) => {
@@ -177,6 +235,7 @@ async function getAuthClient(config) {
 
   const { tokens } = await oauth2Client.getToken(code);
   oauth2Client.setCredentials(tokens);
+  const tokenPath = getTokenPath();
   writeFileSync(tokenPath, JSON.stringify(tokens, null, 2));
   console.log('認証完了');
 
@@ -188,6 +247,43 @@ async function getAuthClient(config) {
   });
 
   return oauth2Client;
+}
+
+async function getAuthClient(config) {
+  const tokenPath = getTokenPath();
+  // 既存 token があれば、発行元 client (desktop / device) を判別して対応する credential を使う
+  if (existsSync(tokenPath)) {
+    const tokens = JSON.parse(readFileSync(tokenPath, 'utf-8'));
+    const isDeviceToken = tokens._client_type === 'device';
+    const clientId = isDeviceToken ? config.googleDeviceClientId : config.googleClientId;
+    const clientSecret = isDeviceToken ? config.googleDeviceClientSecret : config.googleClientSecret;
+    if (!clientId || !clientSecret) {
+      console.error(`エラー: token (${isDeviceToken ? 'device' : 'desktop'}) 発行元の OAuth client 情報が未設定です`);
+      process.exit(1);
+    }
+    const oauth2Client = new google.auth.OAuth2(clientId, clientSecret, OAUTH_REDIRECT_URI);
+    oauth2Client.setCredentials(tokens);
+    oauth2Client.on('tokens', (newTokens) => {
+      try {
+        const saved = JSON.parse(readFileSync(tokenPath, 'utf-8'));
+        writeFileSync(tokenPath, JSON.stringify({ ...saved, ...newTokens }, null, 2));
+      } catch { }
+    });
+    return oauth2Client;
+  }
+
+  // token 無し → 初回 desktop OAuth (init 用)
+  if (!config.googleClientId || !config.googleClientSecret) {
+    console.error('エラー: Google OAuth クライアント ID/Secret が設定されていません');
+    console.error('init コマンドで --client-id と --client-secret を指定してください');
+    process.exit(1);
+  }
+  const oauth2Client = new google.auth.OAuth2(
+    config.googleClientId,
+    config.googleClientSecret,
+    OAUTH_REDIRECT_URI
+  );
+  return performOAuthFlow(oauth2Client);
 }
 
 async function getDriveClient(config) {
@@ -501,6 +597,55 @@ async function runCli(args) {
         break;
       }
 
+      case "reauth": {
+        // init 済み前提
+        if (!config.driveFolderId) {
+          console.error('エラー: DRIVE_FOLDER_ID が未設定です');
+          console.error('先に init を実行してください');
+          process.exit(1);
+        }
+        if (!config.googleDeviceClientId || !config.googleDeviceClientSecret) {
+          console.error('エラー: Device flow 用 OAuth client が未設定です');
+          console.error('~/.secrets-manager.conf に GOOGLE_DEVICE_CLIENT_ID / GOOGLE_DEVICE_CLIENT_SECRET を追加してください');
+          console.error('(Google Cloud Console → OAuth 2.0 クライアント ID → "TVs and Limited Input devices" タイプを作成)');
+          process.exit(1);
+        }
+
+        // 失効 token を退避
+        const tokenPath = getTokenPath();
+        if (existsSync(tokenPath)) {
+          const backupPath = `${tokenPath}.stale-${Date.now()}`;
+          try {
+            writeFileSync(backupPath, readFileSync(tokenPath));
+            rmSync(tokenPath);
+            console.log(`旧 token を退避: ${backupPath}`);
+          } catch (e) {
+            console.error(`警告: 旧 token の退避に失敗: ${e.message}`);
+          }
+        }
+
+        // Device Flow 実行 (別デバイスのブラウザで承認)
+        const tokens = await performDeviceFlow(config);
+
+        // googleapis の OAuth2 クライアントにトークンを流し込んで Drive 疎通確認
+        const oauth2Client = new google.auth.OAuth2(
+          config.googleDeviceClientId,
+          config.googleDeviceClientSecret
+        );
+        oauth2Client.setCredentials(tokens);
+        const drive = google.drive({ version: 'v3', auth: oauth2Client });
+        try {
+          const res = await drive.files.get({ fileId: config.driveFolderId, fields: 'id, name' });
+          console.log(`Drive フォルダ確認: ${res.data.name} (${config.driveFolderId})`);
+        } catch (e) {
+          console.error(`警告: Drive フォルダ検証失敗 (${e.message})`);
+          console.error('token は更新済み。フォルダ ID / 権限を確認してください');
+          process.exit(1);
+        }
+        console.log('再認証完了');
+        break;
+      }
+
       case "list": {
         const folder = parsed.positional[1];
         const drive = await getDriveClient(config);
@@ -733,7 +878,15 @@ async function runCli(args) {
         let drive;
         try { drive = await getDriveClient(config); } catch { process.exit(0); }
 
+        let reauthWarned = false;
+        const warnReauth = () => {
+          if (reauthWarned) return;
+          reauthWarned = true;
+          console.error('⚠ OAuth expired. Run `gcloud-secrets reauth` to re-authenticate.');
+        };
+
         for (const envFile of envFiles) {
+          if (reauthWarned) break;
           let content;
           try { content = readFileSync(envFile.path, 'utf-8'); } catch { continue; }
           if (!content.trim()) continue;
@@ -797,6 +950,10 @@ async function runCli(args) {
               syncedAt: new Date().toISOString()
             };
           } catch (error) {
+            if (isInvalidGrantError(error)) {
+              warnReauth();
+              break;
+            }
             console.log(`⚠ ${envFile.filename}: sync skipped (${error.message})`);
           }
         }
@@ -1006,6 +1163,7 @@ exit 0
 使い方:
   gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
                                                    初期設定 (OAuth + age 鍵 + Drive フォルダ)
+  gcloud-secrets reauth                            OAuth token 再認証のみ (config は保持)
   gcloud-secrets list [folder] [--env <env>]       一覧表示
   gcloud-secrets pull [folder] [--env <env>]       シークレットを取得
   gcloud-secrets push [folder] [file] [--env <env>] シークレットをアップロード
