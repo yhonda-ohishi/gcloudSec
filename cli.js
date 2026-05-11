@@ -13,7 +13,7 @@ import { Readable } from "stream";
 // 引数パース
 // ============================================================
 function parseArgs(args) {
-  const result = { positional: [], env: null, ageKey: null, agePub: null, clientId: null, clientSecret: null };
+  const result = { positional: [], env: null, ageKey: null, agePub: null, clientId: null, clientSecret: null, force: false };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--env' || args[i] === '-e') {
       result.env = args[i + 1]; i++;
@@ -27,6 +27,8 @@ function parseArgs(args) {
       result.clientId = args[i + 1]; i++;
     } else if (args[i] === '--client-secret') {
       result.clientSecret = args[i + 1]; i++;
+    } else if (args[i] === '--force' || args[i] === '-f') {
+      result.force = true;
     } else {
       result.positional.push(args[i]);
     }
@@ -528,8 +530,33 @@ async function runCli(args) {
         const clientId = parsed.clientId || config.googleClientId;
         const clientSecret = parsed.clientSecret || config.googleClientSecret;
 
+        // 既存 conf 保護: 既に init 済みなら原則拒否
+        // (引数なしで叩いた時に Drive に新規 "gcloud-secrets" フォルダを作って conf を
+        //  上書きする事故を防ぐ。Token 更新だけしたい場合は reauth を使う)
+        if (config.driveFolderId && !parsed.force) {
+          console.error(`エラー: 既に init 済みです (DRIVE_FOLDER_ID=${config.driveFolderId})`);
+          console.error('');
+          console.error('用途別の正しいコマンド:');
+          console.error('  Token 失効 (invalid_grant) の再認証     → gcloud-secrets reauth');
+          console.error('  別 Drive フォルダに切り替え (要 folder-id) → gcloud-secrets init <folder-id> --force');
+          console.error('  初回セットアップ (本当に未 init)        → ~/.secrets-manager.conf を削除してから init');
+          process.exit(1);
+        }
+        // --force でも folder-id 未指定での新規フォルダ自動作成は禁止
+        // (--force は「既存設定を別フォルダで書き換える」用、新規作成は明示要求のみ)
+        if (config.driveFolderId && parsed.force && !driveFolderId) {
+          console.error('エラー: --force での新規 Drive フォルダ自動作成は禁止です');
+          console.error('');
+          console.error('既存フォルダ ID を明示してください:');
+          console.error('  gcloud-secrets init <drive-folder-id> --force');
+          console.error('');
+          console.error('本当に新規フォルダで全部作り直したい場合:');
+          console.error('  rm ~/.secrets-manager.conf && gcloud-secrets init');
+          process.exit(1);
+        }
+
         if (!clientId || !clientSecret) {
-          console.error("使い方: gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>] [--age-pub <key>] [--age-key <path>]");
+          console.error("使い方: gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>] [--age-pub <key>] [--age-key <path>] [--force]");
           process.exit(1);
         }
 
@@ -1161,9 +1188,10 @@ exit 0
         console.log(`gcloud-secrets - シークレット管理 CLI (Google Drive + age 暗号化)
 
 使い方:
-  gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
+  gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>] [--force]
                                                    初期設定 (OAuth + age 鍵 + Drive フォルダ)
-  gcloud-secrets reauth                            OAuth token 再認証のみ (config は保持)
+                                                   ※ 既に init 済みなら拒否。再認証は reauth、強制上書きは --force
+  gcloud-secrets reauth                            OAuth token 再認証のみ (config は保持、Device Flow)
   gcloud-secrets list [folder] [--env <env>]       一覧表示
   gcloud-secrets pull [folder] [--env <env>]       シークレットを取得
   gcloud-secrets push [folder] [file] [--env <env>] シークレットをアップロード
@@ -1178,6 +1206,7 @@ exit 0
 オプション:
   --env, -e <env>  環境を指定 (dev, staging, prod など)
                    省略時は設定ファイルの DEFAULT_ENVIRONMENT を使用
+  --force, -f      init で既存設定の上書きを許可 (危険)
 `);
     }
   } catch (error) {

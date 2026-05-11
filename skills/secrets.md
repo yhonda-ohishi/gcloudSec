@@ -1,175 +1,87 @@
-# Skill: secrets
-
-Google Drive + age 暗号化でシークレットを管理するスキル
-
-## コマンド一覧
-
-### 初期化
-```bash
-gcloud-secrets init [drive-folder-id] --client-id <id> --client-secret <secret> [--env <default>]
-```
-Google Drive + OAuth + age 鍵の初期設定を行います。
-- `drive-folder-id` 省略時は Drive に "gcloud-secrets" フォルダを自動作成
-- `--client-id` / `--client-secret`: Google Cloud Console で作成した OAuth クライアント情報
-- `--env` でデフォルト環境を指定（省略時は `dev`）
-- `--age-key <path>` で age 秘密鍵パスを指定（省略時は `~/.age/key.txt`、未作成なら自動生成）
-- `--age-pub <key>` で age 公開鍵を指定（省略時は秘密鍵ファイルから自動取得）
-
-### 再認証 (reauth)
-```bash
-gcloud-secrets reauth
-```
-OAuth token が失効した (refresh token invalid_grant) 時に、**token だけ** を更新します。
-- 既存 config (DRIVE_FOLDER_ID / OAuth client / age 鍵) には一切触れない
-- 失効 token は `~/.secrets-manager-oauth.json.stale-<timestamp>` に退避
-- **OAuth 2.0 Device Flow** (Tailscale 風) で認証: URL + ユーザーコード表示 → 別デバイスで承認 → CLI は token エンドポイントを poll
-- リモート SSH / ヘッドレス環境でも動作 (ローカルブラウザ不要)
-- OAuth フロー後に Drive フォルダの read 疎通も確認
-- pre-commit hook が `invalid_grant` を検知すると `reauth` の実行を促すメッセージを表示 (commit は blocking しない)
-
-**前提**: `~/.secrets-manager.conf` に以下を追加しておくこと (Google Cloud Console で "TVs and Limited Input devices" タイプの OAuth client を作成):
-```
-GOOGLE_DEVICE_CLIENT_ID=xxxxx.apps.googleusercontent.com
-GOOGLE_DEVICE_CLIENT_SECRET=GOCSPX-xxxxx
-```
-
-Init の desktop flow で取った token と device flow で取った token は `_client_type` マーカーで区別され、自動で適切な client 情報で refresh されます。
-
-### 一覧表示
-```bash
-# フォルダ一覧 (環境ごとにグループ化)
-gcloud-secrets list
-
-# 特定フォルダ・環境のシークレット一覧
-gcloud-secrets list <folder> --env dev
-```
-
-### シークレット取得 (pull)
-```bash
-# カレントディレクトリ名をフォルダ名として取得
-gcloud-secrets pull --env dev
-
-# 指定フォルダから取得
-gcloud-secrets pull <folder> --env prod
-```
-Drive から暗号化ファイルをダウンロードし、age で復号して .env 形式で出力します。
-
-### シークレット登録 (push)
-```bash
-# .env ファイルをアップロード (dev 環境)
-gcloud-secrets push --env dev
-
-# 指定フォルダにアップロード (prod 環境)
-gcloud-secrets push <folder> --env prod
-
-# 指定ファイルをアップロード
-gcloud-secrets push <folder> <file> --env staging
-```
-.env ファイルを age で暗号化し、Drive にアップロードします。
-
-### 同期状況スキャン (scan)
-```bash
-# ホームディレクトリ以下をスキャン (全環境)
-gcloud-secrets scan
-
-# 特定環境のみスキャン
-gcloud-secrets scan --env dev
-
-# 指定ディレクトリ以下をスキャン
-gcloud-secrets scan <path> --env prod
-```
-Git リポジトリ内の .env / .dev.vars ファイルと Drive 上の暗号化ファイルの同期状況を確認します。
-
-### 値から逆引き検索 (search)
-```bash
-# 特定の値がどのフォルダ・環境で使われているか検索
-gcloud-secrets search "api-key-12345"
-
-# 特定環境のみ検索
-gcloud-secrets search "client-id" --env prod
-```
-
-出力例:
-```
-Searching for: "api-key-12345"
-
-Scanning 8 files...
-
-[FOUND] my-app / dev - EXTERNAL_API_KEY
-[FOUND] my-app / prod - EXTERNAL_API_KEY
-[FOUND] other-service / dev - LINE_CLIENT_ID
-
-Found 3 matches in 2 folders
-```
-
-#### scan 出力例:
-```
-=== シークレット同期状況 ===
-
-[OK]   project-a/ .env [dev] (3 keys)
-[DIFF] project-b/ .env [prod] (2 keys) - 差分あり
-[NEW]  project-c/ .dev.vars [dev] (5 keys) - 未登録
-
 ---
-合計: 3 ファイル
-  登録済み: 1
-  差分あり: 1
-  未登録: 1
-```
+name: secrets
+description: |
+  Google Drive + age 暗号化で .env をバックアップ・同期する CLI `/usr/bin/gcloud-secrets` (パッケージ `@yhonda/gcloud-secrets`) の使い方ガイド。
+  トリガー: 「secret」「シークレット」「.env backup」「Drive 同期」「gcloud-secrets」「backup 漏れ」「init」「reauth」「invalid_grant」「.env を Drive にあげたい」「環境変数 backup」等。
+  最初に `gcloud-secrets` を引数なしで叩いて最新のコマンド一覧を取得し、user の意図に合うサブコマンドを選んで実行する。
+---
 
-### .env 自動同期 (pre-commit)
-```bash
-# カレントディレクトリの .env を Drive に自動同期
-gcloud-secrets pre-commit
-```
-git hook 用の高速コマンド。キャッシュで .env の変更を検知し、変更がなければ API コール 0 で即座に終了。
-変更があれば Drive からダウンロード＋復号で比較し、差分があれば暗号化＋アップロード。
+# Skill: secrets (Drive + age backup)
 
-### グローバル git hook (hook)
-```bash
-# グローバル pre-commit hook をインストール
-gcloud-secrets hook install
+`/usr/bin/gcloud-secrets` は **Google Drive に age 暗号化した `.env` を保管する CLI** (パッケージ `@yhonda/gcloud-secrets`、source: `~/gcloudSec`)。
+GCP Secret Manager 連携の方 (`gcloud-secrets-mcp`) は廃止済 — このスキルは **Drive 版のみ** を扱う。
 
-# アンインストール
-gcloud-secrets hook uninstall
-```
-`hook install` で全リポジトリの `git commit` 時に `pre-commit` が自動実行されます。
-既存の `.husky/` や `.git/hooks/` のフックにもフォワードするので互換性があります。
+## 鉄則 (これだけ覚えれば事故らない)
 
-## 環境 (Environment) オプション
+1. **`gcloud-secrets init` を引数なしで叩かない** — Drive に新フォルダを作って `.secrets-manager.conf` を上書きする (v3.x 以降は guard 入り、それ以前は事故る)。Token を取り直したいだけなら **必ず `gcloud-secrets reauth`**。
+2. **使い方を忘れたら `gcloud-secrets` (引数なし)** — 常に最新の help を出す。このスキルが古くても CLI 側が source of truth。
+3. **作業 cwd = フォルダ名** — `push` / `pull` は cwd のディレクトリ名を Drive フォルダ名として扱う。明示指定したい時は `<folder>` を渡す。
+4. **環境**: `--env dev / staging / prod`。省略時は `~/.secrets-manager.conf` の `DEFAULT_ENVIRONMENT`。
+5. **SSH + 別マシン (Windows VSCode 等) なら Device Flow**: `reauth` は Device Flow なので URL とコードが出るだけ、別マシンのブラウザで承認して OK (port forward 不要)。
 
-`--env` または `-e` で環境を指定できます:
-- `dev` - 開発環境
-- `staging` - ステージング環境
-- `prod` - 本番環境
-- その他任意の文字列
-
-デフォルト環境は `~/.secrets-manager.conf` の `DEFAULT_ENVIRONMENT` で設定されます。
-
-## 使用例
+## 最初にやること (Claude が skill 起動時に必ず実行)
 
 ```bash
-# 1. 初期化 (OAuth クライアント情報を設定)
-gcloud-secrets init --client-id "xxx.apps.googleusercontent.com" --client-secret "GOCSPX-xxx" --env dev
-
-# 2. dev 環境に .env を登録
-gcloud-secrets push --env dev
-
-# 3. prod 環境から取得
-gcloud-secrets pull --env prod > .env.prod
-
-# 4. 全リポジトリの同期状況を確認
-gcloud-secrets scan ~/
-
-# 5. dev 環境のみスキャン
-gcloud-secrets scan ~/ --env dev
-
-# 6. 特定の値がどこで使われているか検索
-gcloud-secrets search "line-client-id-xxx"
-
-# 7. グローバル git hook をインストール (全リポジトリで自動同期)
-gcloud-secrets hook install
-
-# 8. 手動で pre-commit を実行
-gcloud-secrets pre-commit
+gcloud-secrets 2>&1 | head -40
 ```
+
+→ 最新のコマンド一覧が出る。user の意図とマッチするサブコマンドを選ぶ。
+
+## よく使う workflow と判断フロー
+
+| user 発言 | 実行コマンド |
+|---|---|
+| 「全 repo の backup 漏れ確認」「scan して」 | `gcloud-secrets scan ~/ --env dev` |
+| 「この .env を backup」「push したい」 | `cd <project> && gcloud-secrets push <folder> .env --env dev` |
+| 「Drive から復元」「pull」 | `cd <project> && gcloud-secrets pull <folder> --env dev` |
+| 「invalid_grant」「token 切れた」「7 日経った」 | `gcloud-secrets reauth` (Device Flow) |
+| 「特定の値どこで使われてる？」 | `gcloud-secrets search "<value>"` |
+| 「git commit 時に自動同期したい」 | `gcloud-secrets hook install` |
+| 「age 秘密鍵 backup」 | `gcloud-secrets key backup` / `key restore` |
+
+実コマンド名 / フラグは CLI の help が source of truth。記憶でなく **必ず help を見てから叩く**。
+
+## エラー別ガイド
+
+| 症状 | 対応 |
+|---|---|
+| `invalid_grant` (refresh token 失効) | `gcloud-secrets reauth` (Device Flow URL を別ブラウザで開く) |
+| `エラー: 既に init 済みです (DRIVE_FOLDER_ID=...)` | 通常はそのまま使える。実は本当に再 init したい時のみ `--force` |
+| `エラー: 先に init を実行してください` | conf 喪失。次節「conf 復旧」へ |
+| `エラー: Device flow 用 OAuth client が未設定です` | GCP Console で "TVs and Limited Input devices" タイプの OAuth client 作成 → conf に `GOOGLE_DEVICE_CLIENT_ID` / `GOOGLE_DEVICE_CLIENT_SECRET` 追記 |
+
+## conf 喪失時の復旧
+
+`~/.secrets-manager.conf` が消えた場合:
+1. `GOOGLE_CLIENT_ID/SECRET` は `~/gcloudSec/.env` にコピーが残っている (`set -a; source ~/gcloudSec/.env; set +a`)
+2. `AGE_PUBLIC_KEY` は `age-keygen -y ~/.age/key.txt` で再導出
+3. **`DRIVE_FOLDER_ID` は Drive 上で名前 "gcloud-secrets" のフォルダを検索** (複数あれば子ファイル数の多い方が本物):
+   ```bash
+   # Drive 上の同名フォルダ一覧 (googleapis 経由)
+   node -e "
+   const { google } = require('/usr/lib/node_modules/@yhonda/gcloud-secrets/node_modules/googleapis');
+   const tokens = require('/home/yhonda/.secrets-manager-oauth.json');
+   const ci = process.env.GOOGLE_CLIENT_ID, cs = process.env.GOOGLE_CLIENT_SECRET;
+   const oauth2 = new google.auth.OAuth2(ci, cs, 'http://localhost:3456/callback');
+   oauth2.setCredentials(tokens);
+   google.drive({version:'v3', auth: oauth2}).files.list({
+     q: \"name='gcloud-secrets' and mimeType='application/vnd.google-apps.folder' and trashed=false\",
+     fields: 'files(id, name, createdTime)',
+   }).then(r => console.log(JSON.stringify(r.data.files, null, 2)));
+   "
+   ```
+4. `~/.secrets-manager-oauth.json` が失効していれば先に `mv` で退避 → `gcloud-secrets init <folder-id> --client-id "$GOOGLE_CLIENT_ID" --client-secret "$GOOGLE_CLIENT_SECRET" --env dev --age-pub "<age-pub>" --age-key ~/.age/key.txt` で復旧
+
+## 設定ファイルの位置
+
+- `~/.secrets-manager.conf` — Drive folder ID / OAuth client / age 鍵パス
+- `~/.secrets-manager-oauth.json` — refresh token (失効したら reauth)
+- `~/.secrets-manager-cache.json` — ローカル同期ハッシュ (push 高速化用)
+- `~/.secrets-manager-scan-ignore.txt` — SessionStart hook 用の警告抑制リスト (1 行 1 プロジェクト名)
+- `~/.age/key.txt` — age 秘密鍵 (これが消えると全 backup 復号不能 → `key backup` で Drive 退避)
+
+## SessionStart hook (自動警告)
+
+`~/.claude/hooks/session-start-secret-scan.sh` が毎セッション scan を実行し、未登録 / 差分あり / .gitignore 漏れがあれば session に注入する。
+- benign な警告は `~/.secrets-manager-scan-ignore.txt` に 1 行追加で抑制可
+- auth 失効も検知 → `reauth` を促す
