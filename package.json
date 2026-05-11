@@ -1,6 +1,6 @@
 {
   "name": "@yhonda/gcloud-secrets",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Google Drive + age 暗号化でシークレットを管理する CLI ツール",
   "type": "module",
   "main": "cli.js",
@@ -10,6 +10,7 @@
   "files": [
     "cli.js",
     "skills/",
+    "hooks/",
     "install-skills.js",
     "README.md"
   ],
